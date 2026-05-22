@@ -957,8 +957,8 @@ local function applySmoothedRemoteState(dtReal)
     local remoteVeh = be:getObjectByID(remoteVehicleId)
     if not remoteVeh then return end
     
-    local currentPos = remoteVeh.getPosition and remoteVeh:getPosition()
-    local currentRot = remoteVeh.getRotation and remoteVeh:getRotation()
+    local currentPos = remoteVeh.getPosition and vec3(remoteVeh:getPosition())
+    local currentRot = remoteVeh.getRotation and quat(remoteVeh:getRotation())
     if not currentPos or not currentRot then return end
     
     -- Calculate distance to target
