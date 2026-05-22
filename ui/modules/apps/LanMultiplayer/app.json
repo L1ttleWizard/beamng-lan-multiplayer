@@ -1,0 +1,19 @@
+{
+  "domElement": "<lan-multiplayer></lan-multiplayer>",
+  "name": "LAN Multiplayer",
+  "types": [
+    "ui.apps.categories.gameplay"
+  ],
+  "css": {
+    "left": "200px",
+    "top": "200px",
+    "width": "340px",
+    "height": "400px",
+    "min-width": "250px",
+    "min-height": "200px"
+  },
+  "description": "2-Player LAN Multiplayer Mod for BeamNG.drive",
+  "author": "Antigravity",
+  "version": "1.0",
+  "directive": "lanMultiplayer"
+}

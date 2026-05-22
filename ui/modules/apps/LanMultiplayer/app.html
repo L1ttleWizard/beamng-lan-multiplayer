@@ -1,0 +1,515 @@
+<div class="bng-mp-container">
+  <style>
+    .bng-mp-container {
+      font-family: 'Outfit', 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: rgba(18, 24, 38, 0.85);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 16px;
+      padding: 18px;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+      max-width: 340px;
+      color: #e2e8f0;
+      box-sizing: border-box;
+    }
+
+    .bng-mp-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      padding-bottom: 10px;
+    }
+
+    .bng-mp-title {
+      font-size: 1.1rem;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      background: linear-gradient(135deg, #38bdf8 0%, #818cf8 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .bng-mp-badge {
+      font-size: 0.75rem;
+      font-weight: 700;
+      padding: 3px 8px;
+      border-radius: 20px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      transition: all 0.3s ease;
+      display: inline-flex;
+      align-items: center;
+    }
+
+    .bng-mp-badge::before {
+      content: '';
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      margin-right: 5px;
+    }
+
+    .bng-mp-badge-idle {
+      background: rgba(100, 116, 139, 0.15);
+      color: #94a3b8;
+      border: 1px solid rgba(148, 163, 184, 0.3);
+    }
+    .bng-mp-badge-idle::before { background: #94a3b8; }
+
+    .bng-mp-badge-hosting {
+      background: rgba(16, 185, 129, 0.15);
+      color: #34d399;
+      border: 1px solid rgba(52, 211, 153, 0.3);
+      box-shadow: 0 0 10px rgba(52, 211, 153, 0.15);
+    }
+    .bng-mp-badge-hosting::before {
+      background: #34d399;
+      animation: bng-mp-pulse 1.5s infinite;
+    }
+
+    .bng-mp-badge-connecting {
+      background: rgba(245, 158, 11, 0.15);
+      color: #fbbf24;
+      border: 1px solid rgba(251, 191, 36, 0.3);
+      box-shadow: 0 0 10px rgba(251, 191, 36, 0.15);
+    }
+    .bng-mp-badge-connecting::before {
+      background: #fbbf24;
+      animation: bng-mp-pulse 1.2s infinite;
+    }
+
+    .bng-mp-badge-connected {
+      background: rgba(59, 130, 246, 0.15);
+      color: #60a5fa;
+      border: 1px solid rgba(96, 165, 250, 0.3);
+      box-shadow: 0 0 12px rgba(96, 165, 250, 0.3);
+    }
+    .bng-mp-badge-connected::before {
+      background: #60a5fa;
+      animation: bng-mp-pulse 1s infinite;
+    }
+
+    @keyframes bng-mp-pulse {
+      0% { transform: scale(0.95); opacity: 0.5; }
+      50% { transform: scale(1.2); opacity: 1; }
+      100% { transform: scale(0.95); opacity: 0.5; }
+    }
+
+    .bng-mp-tab-group {
+      display: flex;
+      background: rgba(15, 23, 42, 0.6);
+      border-radius: 10px;
+      padding: 3px;
+      margin-bottom: 16px;
+      border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .bng-mp-tab-btn {
+      flex: 1;
+      background: transparent;
+      border: none;
+      color: #94a3b8;
+      font-size: 0.8rem;
+      font-weight: 600;
+      padding: 6px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .bng-mp-tab-btn.active {
+      background: rgba(255, 255, 255, 0.08);
+      color: #f8fafc;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+    }
+
+    .bng-mp-form-row { margin-bottom: 12px; }
+
+    .bng-mp-label {
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: #94a3b8;
+      margin-bottom: 5px;
+      display: block;
+      letter-spacing: 0.3px;
+    }
+
+    .bng-mp-input {
+      background: rgba(15, 23, 42, 0.55);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 8px;
+      padding: 8px 12px;
+      color: #fff;
+      font-size: 0.85rem;
+      width: 100%;
+      box-sizing: border-box;
+      transition: all 0.2s ease;
+    }
+
+    .bng-mp-input:focus {
+      border-color: #6366f1;
+      outline: none;
+      box-shadow: 0 0 8px rgba(99, 102, 241, 0.3);
+      background: rgba(15, 23, 42, 0.7);
+    }
+
+    .bng-mp-input-row { display: flex; gap: 10px; }
+    .bng-mp-input-half { flex: 1; }
+
+    .bng-mp-btn {
+      background: linear-gradient(135deg, #4f46e5 0%, #3730a3 100%);
+      border: none;
+      border-radius: 8px;
+      padding: 10px 14px;
+      color: #fff;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      width: 100%;
+      text-align: center;
+      margin-top: 6px;
+      box-shadow: 0 4px 12px rgba(79, 70, 229, 0.25);
+    }
+
+    .bng-mp-btn:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 16px rgba(79, 70, 229, 0.4);
+      filter: brightness(1.1);
+    }
+    .bng-mp-btn:active { transform: translateY(0); }
+
+    .bng-mp-btn-red {
+      background: linear-gradient(135deg, #ef4444 0%, #991b1b 100%);
+      box-shadow: 0 4px 12px rgba(239, 68, 68, 0.25);
+    }
+    .bng-mp-btn-red:hover {
+      box-shadow: 0 6px 16px rgba(239, 68, 68, 0.4);
+    }
+
+    .bng-mp-status-card {
+      background: rgba(15, 23, 42, 0.4);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 10px;
+      padding: 12px;
+      margin-bottom: 14px;
+    }
+
+    .bng-mp-status-line {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.8rem;
+      margin-bottom: 6px;
+    }
+    .bng-mp-status-line:last-child { margin-bottom: 0; }
+
+    .bng-mp-status-lbl { color: #94a3b8; }
+    .bng-mp-status-val { font-weight: 600; color: #f1f5f9; }
+
+    /* Network Metrics Panel */
+    .bng-mp-metrics {
+      background: rgba(15, 23, 42, 0.5);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 10px;
+      padding: 12px;
+      margin-bottom: 14px;
+    }
+
+    .bng-mp-metrics-title {
+      font-size: 0.7rem;
+      font-weight: 700;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 10px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .bng-mp-hz-badge {
+      font-size: 0.65rem;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 8px;
+      background: rgba(99, 102, 241, 0.15);
+      color: #818cf8;
+      border: 1px solid rgba(99, 102, 241, 0.3);
+    }
+
+    .bng-mp-metrics-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px 14px;
+    }
+
+    .bng-mp-metric { display: flex; flex-direction: column; }
+
+    .bng-mp-metric-label {
+      font-size: 0.65rem;
+      font-weight: 600;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .bng-mp-metric-value {
+      font-size: 1.05rem;
+      font-weight: 700;
+      color: #e2e8f0;
+      line-height: 1.3;
+    }
+
+    .bng-mp-metric-unit {
+      font-size: 0.65rem;
+      font-weight: 500;
+      color: #64748b;
+      margin-left: 2px;
+    }
+
+    .bng-mp-metric-value.ping-good { color: #34d399; }
+    .bng-mp-metric-value.ping-ok { color: #fbbf24; }
+    .bng-mp-metric-value.ping-bad { color: #f87171; }
+
+    .bng-mp-metric-value.loss-good { color: #34d399; }
+    .bng-mp-metric-value.loss-warn { color: #fbbf24; }
+    .bng-mp-metric-value.loss-bad { color: #f87171; }
+
+    .bng-mp-metrics-sep {
+      grid-column: 1 / -1;
+      height: 1px;
+      background: rgba(255, 255, 255, 0.06);
+      margin: 4px 0;
+    }
+
+    /* Sparkline */
+    .bng-mp-sparkline-wrap {
+      grid-column: 1 / -1;
+      margin-top: 4px;
+    }
+
+    .bng-mp-sparkline-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 4px;
+    }
+
+    .bng-mp-sparkline-label {
+      font-size: 0.65rem;
+      font-weight: 600;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .bng-mp-sparkline-range {
+      font-size: 0.6rem;
+      color: #475569;
+    }
+
+    .bng-mp-sparkline {
+      width: 100%;
+      height: 32px;
+      background: rgba(15, 23, 42, 0.5);
+      border-radius: 6px;
+      border: 1px solid rgba(255, 255, 255, 0.04);
+      overflow: hidden;
+    }
+
+    .bng-mp-sparkline svg {
+      width: 100%;
+      height: 100%;
+    }
+
+    .bng-mp-sparkline-line {
+      fill: none;
+      stroke: url(#sparkGradient);
+      stroke-width: 1.5;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .bng-mp-sparkline-area {
+      fill: url(#sparkAreaGradient);
+    }
+  </style>
+
+  <!-- Header -->
+  <div class="bng-mp-header">
+    <span class="bng-mp-title">LAN Multiplayer</span>
+    <span class="bng-mp-badge"
+          ng-class="{
+            'bng-mp-badge-idle': status == 'IDLE',
+            'bng-mp-badge-hosting': status == 'HOSTING',
+            'bng-mp-badge-connecting': status == 'CONNECTING',
+            'bng-mp-badge-connected': status == 'CONNECTED'
+          }">
+      {{status}}
+    </span>
+  </div>
+
+  <!-- Error Message Alert -->
+  <div ng-if="error" style="background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 8px; padding: 8px 12px; margin-bottom: 14px; font-size: 0.8rem; color: #f87171;">
+    <span style="font-weight: 700; display: block; margin-bottom: 2px;">Connection Error</span>
+    {{error}}
+  </div>
+
+  <!-- Nickname Settings -->
+  <div class="bng-mp-form-row" style="margin-bottom: 14px;">
+    <label class="bng-mp-label" for="myNickname">My Nickname</label>
+    <input class="bng-mp-input" id="myNickname" type="text" ng-model="nickname" ng-change="updateNickname()" placeholder="Player">
+  </div>
+
+  <!-- Connection Setup Form (Visible when Disconnected) -->
+  <div ng-if="status == 'IDLE'">
+    <div class="bng-mp-tab-group" ng-init="activeTab = 'connect'">
+      <button class="bng-mp-tab-btn"
+              ng-class="{'active': activeTab == 'connect'}"
+              ng-click="activeTab = 'connect'">Connect</button>
+      <button class="bng-mp-tab-btn"
+              ng-class="{'active': activeTab == 'host'}"
+              ng-click="activeTab = 'host'">Host</button>
+    </div>
+
+    <div ng-if="activeTab == 'host'">
+      <div class="bng-mp-form-row">
+        <label class="bng-mp-label" for="hostPort">Listen Port (UDP)</label>
+        <input class="bng-mp-input" id="hostPort" type="number" ng-model="config.port" placeholder="27015">
+      </div>
+      <button class="bng-mp-btn" ng-click="host()">Host Server</button>
+    </div>
+
+    <div ng-if="activeTab == 'connect'">
+      <div class="bng-mp-form-row">
+        <label class="bng-mp-label" for="hostIp">Host IP Address</label>
+        <input class="bng-mp-input" id="hostIp" type="text" ng-model="config.ip" placeholder="192.168.1.100">
+      </div>
+      <div class="bng-mp-form-row bng-mp-input-row">
+        <div class="bng-mp-input-half">
+          <label class="bng-mp-label" for="connPort">Host Port</label>
+          <input class="bng-mp-input" id="connPort" type="number" ng-model="config.port" placeholder="27015">
+        </div>
+        <div class="bng-mp-input-half">
+          <label class="bng-mp-label" for="clientPort">Client Port</label>
+          <input class="bng-mp-input" id="clientPort" type="number" ng-model="config.clientPort" placeholder="0 (Auto)">
+        </div>
+      </div>
+      <button class="bng-mp-btn" ng-click="connect()">Connect to Host</button>
+    </div>
+  </div>
+
+  <!-- Connected Status + Metrics -->
+  <div ng-if="status != 'IDLE'">
+    <div class="bng-mp-status-card">
+      <div class="bng-mp-status-line" ng-if="status == 'CONNECTED' && remoteNickname">
+        <span class="bng-mp-status-lbl">Friend:</span>
+        <span class="bng-mp-status-val" style="color: #60a5fa; font-weight: 700;">{{remoteNickname}}</span>
+      </div>
+      <div class="bng-mp-status-line">
+        <span class="bng-mp-status-lbl">Role:</span>
+        <span class="bng-mp-status-val">{{role}}</span>
+      </div>
+      <div class="bng-mp-status-line" ng-if="role == 'CLIENT'">
+        <span class="bng-mp-status-lbl">Server IP:</span>
+        <span class="bng-mp-status-val">{{active.ip}}</span>
+      </div>
+      <div class="bng-mp-status-line">
+        <span class="bng-mp-status-lbl">Local Port:</span>
+        <span class="bng-mp-status-val">{{active.port}}</span>
+      </div>
+    </div>
+
+    <!-- Network Metrics -->
+    <div class="bng-mp-metrics" ng-if="status == 'CONNECTED'">
+      <div class="bng-mp-metrics-title">
+        <span>Network Metrics</span>
+        <span class="bng-mp-hz-badge">{{metrics.hz}} Hz</span>
+      </div>
+      <div class="bng-mp-metrics-grid">
+        <!-- Ping -->
+        <div class="bng-mp-metric">
+          <span class="bng-mp-metric-label">Ping</span>
+          <span class="bng-mp-metric-value"
+                ng-class="{'ping-good': metrics.ping < 20, 'ping-ok': metrics.ping >= 20 && metrics.ping < 60, 'ping-bad': metrics.ping >= 60}">
+            {{metrics.ping}}<span class="bng-mp-metric-unit">ms</span>
+          </span>
+        </div>
+        <!-- Jitter -->
+        <div class="bng-mp-metric">
+          <span class="bng-mp-metric-label">Jitter</span>
+          <span class="bng-mp-metric-value">
+            {{metrics.jitter}}<span class="bng-mp-metric-unit">ms</span>
+          </span>
+        </div>
+
+        <div class="bng-mp-metrics-sep"></div>
+
+        <!-- TX Rate -->
+        <div class="bng-mp-metric">
+          <span class="bng-mp-metric-label">TX Rate</span>
+          <span class="bng-mp-metric-value">{{metrics.txRate}}<span class="bng-mp-metric-unit">pkt/s</span></span>
+        </div>
+        <!-- RX Rate -->
+        <div class="bng-mp-metric">
+          <span class="bng-mp-metric-label">RX Rate</span>
+          <span class="bng-mp-metric-value">{{metrics.rxRate}}<span class="bng-mp-metric-unit">pkt/s</span></span>
+        </div>
+
+        <!-- TX BW -->
+        <div class="bng-mp-metric">
+          <span class="bng-mp-metric-label">TX Bandwidth</span>
+          <span class="bng-mp-metric-value">{{metrics.txKBs}}<span class="bng-mp-metric-unit">KB/s</span></span>
+        </div>
+        <!-- RX BW -->
+        <div class="bng-mp-metric">
+          <span class="bng-mp-metric-label">RX Bandwidth</span>
+          <span class="bng-mp-metric-value">{{metrics.rxKBs}}<span class="bng-mp-metric-unit">KB/s</span></span>
+        </div>
+
+        <div class="bng-mp-metrics-sep"></div>
+
+        <!-- Packet Loss -->
+        <div class="bng-mp-metric">
+          <span class="bng-mp-metric-label">Packet Loss</span>
+          <span class="bng-mp-metric-value"
+                ng-class="{'loss-good': metrics.packetLoss < 1, 'loss-warn': metrics.packetLoss >= 1 && metrics.packetLoss < 5, 'loss-bad': metrics.packetLoss >= 5}">
+            {{metrics.packetLoss}}<span class="bng-mp-metric-unit">%</span>
+          </span>
+        </div>
+
+        <!-- Sparkline -->
+        <div class="bng-mp-sparkline-wrap" ng-if="metrics.pingHistory.length > 1">
+          <div class="bng-mp-sparkline-header">
+            <span class="bng-mp-sparkline-label">Ping History (30s)</span>
+            <span class="bng-mp-sparkline-range">max {{metrics.pingMax}} ms</span>
+          </div>
+          <div class="bng-mp-sparkline">
+            <svg viewBox="0 0 200 32" preserveAspectRatio="none">
+              <defs>
+                <linearGradient id="sparkGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                  <stop offset="0%" style="stop-color:#38bdf8;stop-opacity:0.6" />
+                  <stop offset="100%" style="stop-color:#818cf8;stop-opacity:1" />
+                </linearGradient>
+                <linearGradient id="sparkAreaGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+                  <stop offset="0%" style="stop-color:#818cf8;stop-opacity:0.2" />
+                  <stop offset="100%" style="stop-color:#818cf8;stop-opacity:0" />
+                </linearGradient>
+              </defs>
+              <path ng-attr-d="{{metrics.sparklinePath + ' L200,32 L0,32 Z'}}" class="bng-mp-sparkline-area"/>
+              <path ng-attr-d="{{metrics.sparklinePath}}" class="bng-mp-sparkline-line"/>
+            </svg>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <button class="bng-mp-btn bng-mp-btn-red" ng-click="disconnect()">
+      {{status == 'CONNECTING' ? 'Cancel Connection' : 'Disconnect'}}
+    </button>
+  </div>
+</div>
