@@ -5,6 +5,27 @@ local M = {}
 
 -- Libraries
 local socket = require("socket")
+local ffi = require("ffi")
+
+-- Register FFI structure for zero-allocation binary updates
+ffi.cdef[[
+typedef struct {
+    uint32_t magic;   // 0x42555044
+    uint32_t seq;
+    float px, py, pz;
+    float rx, ry, rz, rw;
+    float vx, vy, vz;
+    float ax, ay, az;
+    float throttle;
+    float steering;
+    float brake;
+    float clutch;
+    float handbrake;
+} UpdatePacket;
+]]
+
+local outPacket = ffi.new("UpdatePacket")
+local inPacket = ffi.new("UpdatePacket")
 
 -- State variables
 local state = "IDLE" -- "IDLE", "HOSTING", "CONNECTING", "CONNECTED"
@@ -588,7 +609,7 @@ local function sendPacket(payload)
     sendRaw(jsonEncode(payload))
 end
 
--- Send update packet with zero Lua-GC allocations using manual JSON formatting
+-- Send update packet with zero Lua-GC allocations using binary FFI struct
 local function sendUpdate()
     local myVeh = be:getPlayerVehicle(0)
     if not myVeh then return end
@@ -599,7 +620,6 @@ local function sendUpdate()
     local pos = myVeh.getPosition and myVeh:getPosition()
     local rawRot = myVeh.getRotation and myVeh:getRotation()
     if not pos or not rawRot then return end
-    -- quat() is required: C++ QuatF field order differs from standard XYZW convention
     local rot = quat(rawRot)
     
     local vx, vy, vz = 0, 0, 0
@@ -612,17 +632,30 @@ local function sendUpdate()
     
     local t, s, b, c, hb = getInputsRaw()
     
-    local rawJson = string.format(
-        '{"t":"u","s":%d,"p":[%.3f,%.3f,%.3f],"r":[%.5f,%.5f,%.5f,%.5f],"v":[%.3f,%.3f,%.3f],"a":[%.3f,%.3f,%.3f],"i":[%.3f,%.3f,%.3f,%.3f,%.3f]}',
-        txSeq,
-        pos.x, pos.y, pos.z,
-        rot.x, rot.y, rot.z, rot.w,
-        vx, vy, vz,
-        ax, ay, az,
-        t, s, b, c, hb
-    )
+    -- Write to pre-allocated C struct (0 dynamic memory allocation)
+    outPacket.magic = 0x42555044
+    outPacket.seq = txSeq
+    outPacket.px = pos.x
+    outPacket.py = pos.y
+    outPacket.pz = pos.z
+    outPacket.rx = rot.x
+    outPacket.ry = rot.y
+    outPacket.rz = rot.z
+    outPacket.rw = rot.w
+    outPacket.vx = vx
+    outPacket.vy = vy
+    outPacket.vz = vz
+    outPacket.ax = ax
+    outPacket.ay = ay
+    outPacket.az = az
+    outPacket.throttle = t
+    outPacket.steering = s
+    outPacket.brake = b
+    outPacket.clutch = c
+    outPacket.handbrake = hb
     
-    sendRaw(rawJson)
+    -- Send directly as raw binary string (80 bytes)
+    sendRaw(ffi.string(outPacket, 80))
 end
 
 -- Send spawn / vehicle configuration info
@@ -758,6 +791,60 @@ local function setNickname(name)
         local myVeh = be:getPlayerVehicle(0)
         local model, config = getVehicleInfo(myVeh)
         sendSpawn(model, config)
+    end
+end
+
+-- Store remote vehicle target state from binary packet (0 allocations for JSON decoding)
+local function updateRemoteVehicleBinary(data)
+    if not remoteVehicleId then return end
+    
+    -- Track packet loss via sequence numbers
+    local seq = data.seq
+    if remoteLastSeq > 0 then
+        local expected = seq - remoteLastSeq
+        if expected > 0 then
+            local lost = expected - 1
+            remoteLostCount = remoteLostCount + lost
+            remoteTotalExpected = remoteTotalExpected + expected
+        end
+    else
+        remoteTotalExpected = remoteTotalExpected + 1
+    end
+    remoteLastSeq = seq
+    
+    -- Parse target state into BeamNG math types (allocated only when packet is accepted)
+    remoteTargetPos = vec3(data.px, data.py, data.pz)
+    remoteTargetRot = quat(data.rx, data.ry, data.rz, data.rw)
+    remoteTargetVel = vec3(data.vx, data.vy, data.vz)
+    remoteTargetAngVel = vec3(data.ax, data.ay, data.az)
+    
+    -- Calculate speed for 3D drawing
+    remoteLastSpeed = math.sqrt(data.vx*data.vx + data.vy*data.vy + data.vz*data.vz) * 3.6
+    
+    -- Apply control inputs to remote vehicle VM
+    local t = data.throttle
+    local s = data.steering
+    local b = data.brake
+    local c = data.clutch
+    local hb = data.handbrake
+    
+    if not lastRemoteInputs or
+       math.abs(t - lastRemoteInputs.t) > 0.001 or
+       math.abs(s - lastRemoteInputs.s) > 0.001 or
+       math.abs(b - lastRemoteInputs.b) > 0.001 or
+       math.abs(c - lastRemoteInputs.c) > 0.001 or
+       math.abs(hb - lastRemoteInputs.hb) > 0.001 then
+        
+        lastRemoteInputs = { t = t, s = s, b = b, c = c, hb = hb }
+        
+        local cmd = string.format(
+            "input.event('throttle', %f, 1); input.event('steering', %f, 1); input.event('brake', %f, 1); input.event('clutch', %f, 1); input.event('handbrake', %f, 1);",
+            t, s, b, c, hb
+        )
+        local remoteVeh = be:getObjectByID(remoteVehicleId)
+        if remoteVeh then
+            remoteVeh:queueLuaCommand(cmd)
+        end
     end
 end
 
@@ -913,8 +1000,19 @@ local function processPacket(rawMsg, ip, port)
     rxPackets = rxPackets + 1
     rxBytes = rxBytes + #rawMsg
     
-    -- Debug logging for incoming packets (ignore positions 'u' and pings/pongs)
-    if rawMsg:sub(2, 9) ~= '"t":"u"' and rawMsg:sub(2, 9) ~= '"t":"ping' and rawMsg:sub(2, 9) ~= '"t":"pong' then
+    -- Check if it's a binary BUPD update packet (exact length 80, matching magic number)
+    if #rawMsg == 80 then
+        local ptr = ffi.cast("const uint32_t*", ffi.cast("const char*", rawMsg))
+        if ptr[0] == 0x42555044 then
+            lastPacketTime = os.clock()
+            ffi.copy(inPacket, rawMsg, 80)
+            updateRemoteVehicleBinary(inPacket)
+            return
+        end
+    end
+    
+    -- Debug logging for incoming JSON packets (ignore pings/pongs)
+    if rawMsg:sub(2, 9) ~= '"t":"ping' and rawMsg:sub(2, 9) ~= '"t":"pong' then
         log('I', 'lanMultiplayer', 'Received packet from ' .. tostring(ip) .. ':' .. tostring(port) .. ' : ' .. rawMsg:sub(1, 120) .. '... (size: ' .. tostring(#rawMsg) .. ' bytes)')
     end
     
@@ -1034,11 +1132,28 @@ local function receivePackets()
                 break
             end
             
-            -- Fast check for update packets without JSON decode
-            local isUpdate = data:sub(1, 7) == '{"t":"u"' or data:sub(1, 10) == '{"type":"u"'
+            local isUpdate = false
+            local seq = 0
+            
+            -- 1. Check for binary update packet
+            if #data == 80 then
+                local ptr = ffi.cast("const uint32_t*", ffi.cast("const char*", data))
+                if ptr[0] == 0x42555044 then
+                    isUpdate = true
+                    seq = ptr[1]
+                end
+            end
+            
+            -- 2. Fallback to check for JSON update packet
+            if not isUpdate then
+                isUpdate = data:sub(1, 7) == '{"t":"u"' or data:sub(1, 10) == '{"type":"u"'
+                if isUpdate then
+                    local seqStr = data:match('"s":(%d+)')
+                    seq = seqStr and tonumber(seqStr) or 0
+                end
+            end
+            
             if isUpdate then
-                local seqStr = data:match('"s":(%d+)')
-                local seq = seqStr and tonumber(seqStr) or 0
                 if seq > latestUpdateSeq then
                     latestUpdateSeq = seq
                     latestUpdateMsg = data
@@ -1054,11 +1169,28 @@ local function receivePackets()
                 break
             end
             
-            -- Fast check for update packets without JSON decode
-            local isUpdate = data:sub(1, 7) == '{"t":"u"' or data:sub(1, 10) == '{"type":"u"'
+            local isUpdate = false
+            local seq = 0
+            
+            -- 1. Check for binary update packet
+            if #data == 80 then
+                local ptr = ffi.cast("const uint32_t*", ffi.cast("const char*", data))
+                if ptr[0] == 0x42555044 then
+                    isUpdate = true
+                    seq = ptr[1]
+                end
+            end
+            
+            -- 2. Fallback to check for JSON update packet
+            if not isUpdate then
+                isUpdate = data:sub(1, 7) == '{"t":"u"' or data:sub(1, 10) == '{"type":"u"'
+                if isUpdate then
+                    local seqStr = data:match('"s":(%d+)')
+                    seq = seqStr and tonumber(seqStr) or 0
+                end
+            end
+            
             if isUpdate then
-                local seqStr = data:match('"s":(%d+)')
-                local seq = seqStr and tonumber(seqStr) or 0
                 if seq > latestUpdateSeq then
                     latestUpdateSeq = seq
                     latestUpdateMsg = data
