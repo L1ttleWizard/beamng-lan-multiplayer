@@ -969,7 +969,7 @@ local function applySmoothedRemoteState(dtReal)
     
     if dist < smoothThreshold then
         -- Very close: snap directly (no visible difference)
-        remoteVeh:setPosRot(remoteTargetPos, remoteTargetRot)
+        remoteVeh:setPosRot(remoteTargetPos.x, remoteTargetPos.y, remoteTargetPos.z, remoteTargetRot.x, remoteTargetRot.y, remoteTargetRot.z, remoteTargetRot.w)
     else
         -- Smooth exponential convergence (frame-rate independent)
         local alpha = 1.0 - math.exp(-smoothSpeed * dtReal)
@@ -997,7 +997,7 @@ local function applySmoothedRemoteState(dtReal)
         smoothedRot.z = rz
         smoothedRot.w = rw
         
-        remoteVeh:setPosRot(smoothedPos, smoothedRot)
+        remoteVeh:setPosRot(smoothedPos.x, smoothedPos.y, smoothedPos.z, smoothedRot.x, smoothedRot.y, smoothedRot.z, smoothedRot.w)
     end
     
     -- Always set velocity/angularVelocity for physics dead reckoning and visuals
@@ -1016,14 +1016,11 @@ local function processPacket(rawMsg, ip, port)
     rxBytes = rxBytes + #rawMsg
     
     -- Check if it's a binary BUPD update packet (exact length 80, matching magic number)
-    if #rawMsg == 80 then
-        local ptr = ffi.cast("const uint32_t*", ffi.cast("const char*", rawMsg))
-        if ptr[0] == 0x42555044 then
-            lastPacketTime = os.clock()
-            ffi.copy(inPacket, rawMsg, 80)
-            updateRemoteVehicleBinary(inPacket)
-            return
-        end
+    if #rawMsg == 80 and rawMsg:sub(1, 4) == "DPUB" then
+        lastPacketTime = os.clock()
+        ffi.copy(inPacket, rawMsg, 80)
+        updateRemoteVehicleBinary(inPacket)
+        return
     end
     
     -- Debug logging for incoming JSON packets (ignore pings/pongs)
@@ -1151,12 +1148,10 @@ local function receivePackets()
             local seq = 0
             
             -- 1. Check for binary update packet
-            if #data == 80 then
-                local ptr = ffi.cast("const uint32_t*", ffi.cast("const char*", data))
-                if ptr[0] == 0x42555044 then
-                    isUpdate = true
-                    seq = ptr[1]
-                end
+            if #data == 80 and data:sub(1, 4) == "DPUB" then
+                isUpdate = true
+                local b1, b2, b3, b4 = string.byte(data, 5, 8)
+                seq = b1 + b2 * 256 + b3 * 65536 + b4 * 16777216
             end
             
             -- 2. Fallback to check for JSON update packet
@@ -1188,12 +1183,10 @@ local function receivePackets()
             local seq = 0
             
             -- 1. Check for binary update packet
-            if #data == 80 then
-                local ptr = ffi.cast("const uint32_t*", ffi.cast("const char*", data))
-                if ptr[0] == 0x42555044 then
-                    isUpdate = true
-                    seq = ptr[1]
-                end
+            if #data == 80 and data:sub(1, 4) == "DPUB" then
+                isUpdate = true
+                local b1, b2, b3, b4 = string.byte(data, 5, 8)
+                seq = b1 + b2 * 256 + b3 * 65536 + b4 * 16777216
             end
             
             -- 2. Fallback to check for JSON update packet
@@ -1356,10 +1349,10 @@ local function onUpdate(dtReal, dtSim)
                     local pos = remoteVeh:getPosition()
                     -- Modify the returned cdata in-place (it's a copy, safe to mutate)
                     pos.z = pos.z + 2.0
-                    debugDrawer:drawText3D(pos, remoteNickname or "Friend", nickColor)
+                    debugDrawer:drawTextAdvanced(pos, remoteNickname or "Friend", nickColor, true, true, ColorI(0, 0, 0, 128))
                     pos.z = pos.z - 0.5
                     local speedText = string.format("%.0f km/h", remoteLastSpeed)
-                    debugDrawer:drawText3D(pos, speedText, speedColor)
+                    debugDrawer:drawTextAdvanced(pos, speedText, speedColor, true, true, ColorI(0, 0, 0, 128))
                 end
             end
         end

@@ -290,6 +290,50 @@ tests.testAdaptiveSendRate = function()
     assertTrue(recoveryRate < throttledRate, "Rate should increase (smaller send interval) when network recovers")
 end
 
+-- 10. Update Loop and Debug Drawing Test
+tests.testOnUpdateDrawing = function()
+    -- Set up connected state
+    M.connect("127.0.0.1", 27015, 0)
+    M.setState("CONNECTED")
+    
+    -- Mock remote vehicle
+    local mockRemoteVehId = 4321
+    local remoteVeh = createMockVehicle(mockRemoteVehId, "pickup", nil)
+    remoteVeh.position = vec3(10, 20, 30)
+    M.setRemoteVehicleId(mockRemoteVehId)
+    
+    -- Set target state
+    M.updateRemoteVehicle({
+        t = "u",
+        s = 1,
+        p = { 10, 20, 30 },
+        r = { 0, 0, 0, 1 },
+        v = { 10, 0, 0 },  -- 10 m/s = 36 km/h
+        a = { 0, 0, 0 },
+        i = { 0, 0, 0, 0, 0 }
+    })
+    
+    -- Call onUpdate to trigger drawing
+    M.onUpdate(0.016, 0.016)
+    
+    -- Verify that drawings were added to debugDrawer
+    assertEqual(2, #debugDrawer.drawnTexts, "Should draw exactly nickname and speed text")
+    
+    -- Check nickname drawing
+    local draw1 = debugDrawer.drawnTexts[1]
+    assertEqual("Friend", draw1.text)
+    assertNear(10, draw1.pos.x)
+    assertNear(20, draw1.pos.y)
+    assertNear(32, draw1.pos.z) -- pos.z + 2.0
+    
+    -- Check speed drawing
+    local draw2 = debugDrawer.drawnTexts[2]
+    assertEqual("36 km/h", draw2.text)
+    assertNear(10, draw2.pos.x)
+    assertNear(20, draw2.pos.y)
+    assertNear(31.5, draw2.pos.z) -- pos.z - 0.5 (from 32.0)
+end
+
 -- ============================================================================
 -- TEST RUNNER ENGINE
 -- ============================================================================

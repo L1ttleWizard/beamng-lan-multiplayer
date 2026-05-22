@@ -6,6 +6,11 @@ function ColorF(r, g, b, a)
     return { r = r or 1, g = g or 1, b = b or 1, a = a or 1 }
 end
 
+-- Mock ColorI class constructor
+function ColorI(r, g, b, a)
+    return { r = r or 255, g = g or 255, b = b or 255, a = a or 255 }
+end
+
 -- 1. Logging Mock
 function log(level, area, msg)
     -- Silent in test runs to keep output clean, unless needed
@@ -59,8 +64,11 @@ core_levels = {
 -- 5. Debug Drawer Mock
 debugDrawer = {
     drawnTexts = {},
-    drawText3D = function(pos, text, color)
+    drawText3D = function(self, pos, text, color)
         table.insert(debugDrawer.drawnTexts, { pos = vec3(pos), text = text, color = color })
+    end,
+    drawTextAdvanced = function(self, pos, text, color, drawBackground, centerText, backgroundColor)
+        table.insert(debugDrawer.drawnTexts, { pos = vec3(pos), text = text, color = color, bg = backgroundColor })
     end,
     reset = function()
         debugDrawer.drawnTexts = {}
@@ -135,9 +143,14 @@ function createMockVehicle(id, model, config)
         getVelocity = function(self) return self.velocity end,
         getAngularVelocity = function(self) return self.angularVelocity end,
         
-        setPosRot = function(self, pos, rot)
-            self.position = vec3(pos)
-            self.rotation = quat(rot)
+        setPosRot = function(self, x, y, z, rx, ry, rz, rw)
+            if type(x) == "table" or type(x) == "cdata" then
+                self.position = vec3(x)
+                self.rotation = quat(y)
+            else
+                self.position = vec3(x or 0, y or 0, z or 0)
+                self.rotation = quat(rx or 0, ry or 0, rz or 0, rw or 1)
+            end
         end,
         setVelocity = function(self, vel)
             self.velocity = vec3(vel)
