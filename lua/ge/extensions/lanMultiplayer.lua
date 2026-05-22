@@ -273,13 +273,28 @@ local function getSafeConfigPayload(config)
     return nil
 end
 
--- Deep table equivalence comparison via JSON encoding
+-- Deep table equivalence comparison (order-independent)
 local function areConfigsEqual(c1, c2)
     if type(c1) ~= type(c2) then return false end
     if type(c1) ~= "table" then
         return c1 == c2
     end
-    return jsonEncode(c1) == jsonEncode(c2)
+    
+    local keys1 = {}
+    for k, v in pairs(c1) do
+        keys1[k] = true
+        if not areConfigsEqual(v, c2[k]) then
+            return false
+        end
+    end
+    
+    for k, _ in pairs(c2) do
+        if not keys1[k] then
+            return false
+        end
+    end
+    
+    return true
 end
 
 -- Safe control input reader returning raw values to avoid table allocations
@@ -1410,4 +1425,37 @@ M.disconnect = disconnect
 M.requestStatus = notifyUI
 M.setNickname = setNickname
 
+-- Internal API exports for testing
+M.getInputsRaw = getInputsRaw
+M.getMinimizedConfig = getMinimizedConfig
+M.getSafeConfigPayload = getSafeConfigPayload
+M.areConfigsEqual = areConfigsEqual
+M.updateRemoteVehicleBinary = updateRemoteVehicleBinary
+M.updateRemoteVehicle = updateRemoteVehicle
+M.applySmoothedRemoteState = applySmoothedRemoteState
+M.sendUpdate = sendUpdate
+M.receivePackets = receivePackets
+M.resetMetrics = resetMetrics
+M.adaptSendRate = adaptSendRate
+M.setTargetIp = function(ip) targetIp = ip end
+M.setTargetPort = function(port) targetPort = port end
+M.setRole = function(r) role = r end
+M.setState = function(s) state = s end
+M.setSendRate = function(rate) sendRate = rate end
+M.getSendRate = function() return sendRate end
+M.getRemoteVehicleId = function() return remoteVehicleId end
+M.setRemoteVehicleId = function(id) remoteVehicleId = id end
+M.getRemoteTargetPos = function() return remoteTargetPos end
+M.getRemoteTargetRot = function() return remoteTargetRot end
+M.getRemoteTargetVel = function() return remoteTargetVel end
+M.getRemoteTargetAngVel = function() return remoteTargetAngVel end
+M.getRemoteLastSpeed = function() return remoteLastSpeed end
+M.getLastRemoteInputs = function() return lastRemoteInputs end
+M.getTxSeq = function() return txSeq end
+M.getPacketLoss = function() return packetLoss end
+M.getJitter = function() return currentJitter end
+M.setPacketLoss = function(loss) packetLoss = loss end
+M.setJitter = function(jitter) currentJitter = jitter end
+
 return M
+
