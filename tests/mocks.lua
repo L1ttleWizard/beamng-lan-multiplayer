@@ -286,4 +286,21 @@ ffi.cast = function(ct, init)
     end
 end
 
+-- 9. core_vehicleBridge Mock
+core_vehicleBridge = {
+    cachedData = {},
+    registerValueChangeNotification = function(veh, key)
+        -- mock registration
+    end,
+    getCachedVehicleData = function(vehId, key)
+        if core_vehicleBridge.cachedData[vehId] then
+            return core_vehicleBridge.cachedData[vehId][key]
+        end
+        return nil
+    end,
+    reset = function()
+        core_vehicleBridge.cachedData = {}
+    end
+}
+
 

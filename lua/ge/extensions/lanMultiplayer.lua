@@ -2,6 +2,7 @@
 -- Author: Antigravity (Google DeepMind Advanced Agentic Coding)
 
 local M = {}
+M.ghostModeEnabled = false
 
 -- Libraries
 local socket = require("socket")
@@ -10,22 +11,28 @@ local ffi = require("ffi")
 -- Register FFI structure for zero-allocation binary updates
 ffi.cdef[[
 typedef struct {
-    uint32_t magic;   // 0x42555044
+    uint32_t magic;      // 0x42555044
     uint32_t seq;
-    float px, py, pz;
-    float rx, ry, rz, rw;
-    float vx, vy, vz;
-    float ax, ay, az;
-    float throttle;
+    float px, py, pz;    // Position
+    float rx, ry, rz, rw;// Rotation
+    float vx, vy, vz;    // Velocity
+    float ax, ay, az;    // Angular Velocity
+    float throttle;      // Inputs
     float steering;
     float brake;
     float clutch;
     float handbrake;
+    float rpm;           // [NEW] Engine RPM
+    float wheelSpeed;    // [NEW] Average wheel speed
+    int16_t gear;        // [NEW] Transmission gear index
+    uint8_t lights;      // [NEW] Lights bitmask
+    uint8_t flags;       // [NEW] Miscellaneous flags (bit 0: ghost mode)
 } UpdatePacket;
 ]]
 
 local outPacket = ffi.new("UpdatePacket")
 local inPacket = ffi.new("UpdatePacket")
+
 
 -- State variables
 local state = "IDLE" -- "IDLE", "HOSTING", "CONNECTING", "CONNECTED"
@@ -59,6 +66,7 @@ local lastMyVehicleConfig = nil
 local sendTimer = 0
 local sendRate = 0.0166 -- ~60 Hz updates default
 local vehicleCheckTimer = 0
+local damageCheckTimer = 0
 local connectTimer = 0
 local lastPacketTime = 0
 local timeoutLimit = 5.0 -- 5 seconds timeout
@@ -69,16 +77,19 @@ local spawnPendingModel = nil
 local settingsFile = "settings/lanMultiplayer.json"
 
 -- Input filtering state
-local lastRemoteInputs = nil
+local lastRemoteInputs = { t = 0, s = 0, b = 0, c = 0, hb = 0 }
+
 
 -- ============================================================
 -- Remote Vehicle State
 -- ============================================================
 -- Remote target state (updated by packets, applied with smoothing each frame)
-local remoteTargetPos = nil
-local remoteTargetRot = nil
-local remoteTargetVel = nil
-local remoteTargetAngVel = nil
+local remoteTargetPos = vec3(0,0,0)
+local remoteTargetRot = quat(0,0,0,1)
+local remoteTargetVel = vec3(0,0,0)
+local remoteTargetAngVel = vec3(0,0,0)
+local hasRemoteState = false
+local lastGhostState = false
 local remoteLastSpeed = 0       -- km/h for display
 
 -- Interpolation settings
@@ -88,6 +99,7 @@ local smoothThreshold = 0.02    -- meters: below this, just snap directly
 -- Pre-allocated objects to avoid garbage collection pressure
 local smoothedPos = vec3(0,0,0)
 local smoothedRot = quat(0,0,0,1)
+
 local nickColor = ColorF(0.22, 0.74, 1.0, 1.0)
 local speedColor = ColorF(0.85, 0.85, 0.85, 0.75)
 
@@ -156,6 +168,7 @@ local function notifyUI(errMsg)
             configClientPort = savedClientPort or 0,
             nickname = myNickname or "Player",
             remoteNickname = remoteNickname or "",
+            ghostMode = M.ghostModeEnabled,
             error = errMsg
         })
     end
@@ -363,10 +376,21 @@ local function deleteRemoteVehicle()
         spawnPending = false
         spawnPendingModel = nil
     end
-    remoteTargetPos = nil
-    remoteTargetRot = nil
-    remoteTargetVel = nil
-    remoteTargetAngVel = nil
+    hasRemoteState = false
+    lastGhostState = false
+    remoteTargetPos.x = 0
+    remoteTargetPos.y = 0
+    remoteTargetPos.z = 0
+    remoteTargetRot.x = 0
+    remoteTargetRot.y = 0
+    remoteTargetRot.z = 0
+    remoteTargetRot.w = 1
+    remoteTargetVel.x = 0
+    remoteTargetVel.y = 0
+    remoteTargetVel.z = 0
+    remoteTargetAngVel.x = 0
+    remoteTargetAngVel.y = 0
+    remoteTargetAngVel.z = 0
     remoteLastSpeed = 0
 end
 
@@ -450,14 +474,30 @@ local function resetMetrics()
     rxBandwidth = 0
     pingTimer = 0
     metricsTimer = 0
+    damageCheckTimer = 0
     adaptiveTimer = 0
     sendRate = minSendRate
     currentHz = math.floor(1 / minSendRate + 0.5)
-    lastRemoteInputs = nil
-    remoteTargetPos = nil
-    remoteTargetRot = nil
-    remoteTargetVel = nil
-    remoteTargetAngVel = nil
+    lastRemoteInputs.t = 0
+    lastRemoteInputs.s = 0
+    lastRemoteInputs.b = 0
+    lastRemoteInputs.c = 0
+    lastRemoteInputs.hb = 0
+    hasRemoteState = false
+    lastGhostState = false
+    remoteTargetPos.x = 0
+    remoteTargetPos.y = 0
+    remoteTargetPos.z = 0
+    remoteTargetRot.x = 0
+    remoteTargetRot.y = 0
+    remoteTargetRot.z = 0
+    remoteTargetRot.w = 1
+    remoteTargetVel.x = 0
+    remoteTargetVel.y = 0
+    remoteTargetVel.z = 0
+    remoteTargetAngVel.x = 0
+    remoteTargetAngVel.y = 0
+    remoteTargetAngVel.z = 0
     remoteLastSpeed = 0
 end
 
@@ -635,7 +675,7 @@ local function sendUpdate()
     local pos = myVeh.getPosition and myVeh:getPosition()
     local rawRot = myVeh.getRotation and myVeh:getRotation()
     if not pos or not rawRot then return end
-    local rot = quat(rawRot)
+    local rot = rawRot -- Use direct FFI cdata reference without constructor allocation
     
     local vx, vy, vz = 0, 0, 0
     local vel = myVeh.getVelocity and myVeh:getVelocity()
@@ -646,6 +686,34 @@ local function sendUpdate()
     if angVel then ax, ay, az = angVel.x, angVel.y, angVel.z end
     
     local t, s, b, c, hb = getInputsRaw()
+    
+    -- Read electrics cache for player vehicle
+    local myId = myVeh:getId()
+    local rpm = core_vehicleBridge.getCachedVehicleData(myId, 'rpm') or 0
+    local wheelSpeed = core_vehicleBridge.getCachedVehicleData(myId, 'wheelspeed') or 0
+    local gear = core_vehicleBridge.getCachedVehicleData(myId, 'gearIndex') or 0
+    
+    local lights_state = core_vehicleBridge.getCachedVehicleData(myId, 'lights_state') or 0
+    local signal_L = core_vehicleBridge.getCachedVehicleData(myId, 'signal_L') or false
+    local signal_R = core_vehicleBridge.getCachedVehicleData(myId, 'signal_R') or false
+    local hazard = core_vehicleBridge.getCachedVehicleData(myId, 'hazard') or false
+    local fog = core_vehicleBridge.getCachedVehicleData(myId, 'fog') or false
+    local lightbar = core_vehicleBridge.getCachedVehicleData(myId, 'lightbar') or 0
+    local horn = core_vehicleBridge.getCachedVehicleData(myId, 'horn') or false
+    
+    -- Encode lights bitmask
+    local lightsMask = 0
+    if lights_state ~= 0 then lightsMask = lightsMask + 1 end
+    if signal_L then lightsMask = lightsMask + 2 end
+    if signal_R then lightsMask = lightsMask + 4 end
+    if hazard then lightsMask = lightsMask + 8 end
+    if fog then lightsMask = lightsMask + 16 end
+    if lightbar ~= 0 then lightsMask = lightsMask + 32 end
+    if horn then lightsMask = lightsMask + 64 end
+    
+    -- Encode flags (bit 0: Ghost Mode)
+    local flagsMask = 0
+    if M.ghostModeEnabled then flagsMask = flagsMask + 1 end
     
     -- Write to pre-allocated C struct (0 dynamic memory allocation)
     outPacket.magic = 0x42555044
@@ -668,9 +736,14 @@ local function sendUpdate()
     outPacket.brake = b
     outPacket.clutch = c
     outPacket.handbrake = hb
+    outPacket.rpm = rpm
+    outPacket.wheelSpeed = wheelSpeed
+    outPacket.gear = gear
+    outPacket.lights = lightsMask
+    outPacket.flags = flagsMask
     
-    -- Send directly as raw binary string (80 bytes)
-    sendRaw(ffi.string(outPacket, 80))
+    -- Send directly as raw binary string (92 bytes)
+    sendRaw(ffi.string(outPacket, 92))
 end
 
 -- Send spawn / vehicle configuration info
@@ -827,37 +900,89 @@ local function updateRemoteVehicleBinary(data)
     end
     remoteLastSeq = seq
     
-    -- Parse target state into BeamNG math types (allocated only when packet is accepted)
-    remoteTargetPos = vec3(data.px, data.py, data.pz)
-    remoteTargetRot = quat(data.rx, data.ry, data.rz, data.rw)
-    remoteTargetVel = vec3(data.vx, data.vy, data.vz)
-    remoteTargetAngVel = vec3(data.ax, data.ay, data.az)
+    -- Parse target state into pre-allocated FFI objects (0 heap allocations)
+    remoteTargetPos.x = data.px
+    remoteTargetPos.y = data.py
+    remoteTargetPos.z = data.pz
+    
+    remoteTargetRot.x = data.rx
+    remoteTargetRot.y = data.ry
+    remoteTargetRot.z = data.rz
+    remoteTargetRot.w = data.rw
+    
+    remoteTargetVel.x = data.vx
+    remoteTargetVel.y = data.vy
+    remoteTargetVel.z = data.vz
+    
+    remoteTargetAngVel.x = data.ax
+    remoteTargetAngVel.y = data.ay
+    remoteTargetAngVel.z = data.az
+    
+    hasRemoteState = true
     
     -- Calculate speed for 3D drawing
     remoteLastSpeed = math.sqrt(data.vx*data.vx + data.vy*data.vy + data.vz*data.vz) * 3.6
     
-    -- Apply control inputs to remote vehicle VM
     local t = data.throttle
     local s = data.steering
     local b = data.brake
     local c = data.clutch
     local hb = data.handbrake
+    local rpm = data.rpm
+    local wheelSpeed = data.wheelSpeed
+    local gear = data.gear
+    local lights = data.lights
+    local flags = data.flags
     
-    if not lastRemoteInputs or
-       math.abs(t - lastRemoteInputs.t) > 0.001 or
-       math.abs(s - lastRemoteInputs.s) > 0.001 or
-       math.abs(b - lastRemoteInputs.b) > 0.001 or
-       math.abs(c - lastRemoteInputs.c) > 0.001 or
-       math.abs(hb - lastRemoteInputs.hb) > 0.001 then
+    local remoteVeh = be:getObjectByID(remoteVehicleId)
+    if remoteVeh then
+        -- 1. Handle Ghost Mode (bit 0 of flags)
+        local bit = require("bit")
+        local currentGhost = bit.band(flags, 1) ~= 0
+        if currentGhost ~= lastGhostState then
+            lastGhostState = currentGhost
+            remoteVeh:setField('collision', 0, currentGhost and 'false' or 'true')
+            remoteVeh:setField('collisionType', 0, currentGhost and 'None' or 'Collision Mesh')
+            log('I', 'lanMultiplayer', 'Ghost mode state toggled: ' .. tostring(currentGhost))
+        end
         
-        lastRemoteInputs = { t = t, s = s, b = b, c = c, hb = hb }
+        -- 2. Throttled combined inputs + vehicle sync (RPM, Gear, Wheels, Lights)
+        local inputsChanged = math.abs(t - lastRemoteInputs.t) > 0.001 or
+                              math.abs(s - lastRemoteInputs.s) > 0.001 or
+                              math.abs(b - lastRemoteInputs.b) > 0.001 or
+                              math.abs(c - lastRemoteInputs.c) > 0.001 or
+                              math.abs(hb - lastRemoteInputs.hb) > 0.001
         
-        local cmd = string.format(
-            "input.event('throttle', %f, 1); input.event('steering', %f, 1); input.event('brake', %f, 1); input.event('clutch', %f, 1); input.event('handbrake', %f, 1);",
-            t, s, b, c, hb
-        )
-        local remoteVeh = be:getObjectByID(remoteVehicleId)
-        if remoteVeh then
+        M._lastSyncedRPM = M._lastSyncedRPM or 0
+        M._lastSyncedWS = M._lastSyncedWS or 0
+        M._lastSyncedGear = M._lastSyncedGear or -9
+        M._lastSyncedLights = M._lastSyncedLights or 0
+        M._lastSyncedFlags = M._lastSyncedFlags or 0
+        M._syncCounter = (M._syncCounter or 0) + 1
+        
+        local stateChanged = math.abs(rpm - M._lastSyncedRPM) > 10 or
+                             math.abs(wheelSpeed - M._lastSyncedWS) > 0.1 or
+                             gear ~= M._lastSyncedGear or
+                             lights ~= M._lastSyncedLights or
+                             flags ~= M._lastSyncedFlags
+        
+        if inputsChanged or stateChanged or M._syncCounter >= 15 then
+            M._syncCounter = 0
+            
+            -- Update trackers
+            lastRemoteInputs.t = t
+            lastRemoteInputs.s = s
+            lastRemoteInputs.b = b
+            lastRemoteInputs.c = c
+            lastRemoteInputs.hb = hb
+            M._lastSyncedRPM = rpm
+            M._lastSyncedWS = wheelSpeed
+            M._lastSyncedGear = gear
+            M._lastSyncedLights = lights
+            M._lastSyncedFlags = flags
+            
+            -- Format and queue single short sync command to remote vehicle VM
+            local cmd = string.format("globalSyncVeh(%f,%f,%f,%f,%f,%f,%d,%f,%d,%d)", t, s, b, c, hb, rpm, gear, wheelSpeed, lights, flags)
             remoteVeh:queueLuaCommand(cmd)
         end
     end
@@ -904,10 +1029,25 @@ local function updateRemoteVehicle(data)
     end
     
     -- Store target state for smoothed application in onUpdate
-    remoteTargetPos = p
-    remoteTargetRot = r
-    remoteTargetVel = v
-    remoteTargetAngVel = av
+    remoteTargetPos.x = p.x
+    remoteTargetPos.y = p.y
+    remoteTargetPos.z = p.z
+    
+    remoteTargetRot.x = r.x
+    remoteTargetRot.y = r.y
+    remoteTargetRot.z = r.z
+    remoteTargetRot.w = r.w
+    
+    remoteTargetVel.x = v.x
+    remoteTargetVel.y = v.y
+    remoteTargetVel.z = v.z
+    
+    remoteTargetAngVel.x = av.x
+    remoteTargetAngVel.y = av.y
+    remoteTargetAngVel.z = av.z
+    
+    hasRemoteState = true
+
     
     -- Calculate remote speed for 3D display (m/s -> km/h)
     remoteLastSpeed = math.sqrt(v.x*v.x + v.y*v.y + v.z*v.z) * 3.6
@@ -929,14 +1069,18 @@ local function updateRemoteVehicle(data)
             hb = inputs.handbrake or 0
         end
         
-        if not lastRemoteInputs or
-           math.abs(t - lastRemoteInputs.t) > 0.001 or
-           math.abs(s - lastRemoteInputs.s) > 0.001 or
-           math.abs(b - lastRemoteInputs.b) > 0.001 or
-           math.abs(c - lastRemoteInputs.c) > 0.001 or
-           math.abs(hb - lastRemoteInputs.hb) > 0.001 then
-            
-            lastRemoteInputs = { t = t, s = s, b = b, c = c, hb = hb }
+        local inputsChanged = math.abs(t - lastRemoteInputs.t) > 0.001 or
+                              math.abs(s - lastRemoteInputs.s) > 0.001 or
+                              math.abs(b - lastRemoteInputs.b) > 0.001 or
+                              math.abs(c - lastRemoteInputs.c) > 0.001 or
+                              math.abs(hb - lastRemoteInputs.hb) > 0.001
+        
+        if inputsChanged then
+            lastRemoteInputs.t = t
+            lastRemoteInputs.s = s
+            lastRemoteInputs.b = b
+            lastRemoteInputs.c = c
+            lastRemoteInputs.hb = hb
             
             local cmd = string.format(
                 "input.event('throttle', %f, 1); input.event('steering', %f, 1); input.event('brake', %f, 1); input.event('clutch', %f, 1); input.event('handbrake', %f, 1);",
@@ -952,13 +1096,13 @@ end
 
 -- Apply smoothed remote vehicle state every frame using pre-allocated objects
 local function applySmoothedRemoteState(dtReal)
-    if not remoteVehicleId or not remoteTargetPos or not remoteTargetRot then return end
+    if not remoteVehicleId or not hasRemoteState then return end
     
     local remoteVeh = be:getObjectByID(remoteVehicleId)
     if not remoteVeh then return end
     
-    local currentPos = remoteVeh.getPosition and vec3(remoteVeh:getPosition())
-    local currentRot = remoteVeh.getRotation and quat(remoteVeh:getRotation())
+    local currentPos = remoteVeh.getPosition and remoteVeh:getPosition()
+    local currentRot = remoteVeh.getRotation and remoteVeh:getRotation()
     if not currentPos or not currentRot then return end
     
     -- Calculate distance to target
@@ -1015,16 +1159,20 @@ local function processPacket(rawMsg, ip, port)
     rxPackets = rxPackets + 1
     rxBytes = rxBytes + #rawMsg
     
-    -- Check if it's a binary BUPD update packet (exact length 80, matching magic number)
-    if #rawMsg == 80 and rawMsg:sub(1, 4) == "DPUB" then
+    -- Check if it's a binary BUPD update packet (exact length 92, matching magic number)
+    local m1, m2, m3, m4 = string.byte(rawMsg, 1, 4)
+    if #rawMsg == 92 and m1 == 68 and m2 == 80 and m3 == 85 and m4 == 66 then -- "DPUB"
         lastPacketTime = os.clock()
-        ffi.copy(inPacket, rawMsg, 80)
+        ffi.copy(inPacket, rawMsg, 92)
         updateRemoteVehicleBinary(inPacket)
         return
     end
     
     -- Debug logging for incoming JSON packets (ignore pings/pongs)
-    if rawMsg:sub(2, 9) ~= '"t":"ping' and rawMsg:sub(2, 9) ~= '"t":"pong' then
+    local j1, j2, j3, j4, j5, j6, j7, j8, j9 = string.byte(rawMsg, 2, 10)
+    local isPingPongLogIgnore = (j1 == 34 and j2 == 116 and j3 == 34 and j4 == 58 and j5 == 34 and j6 == 112 and j7 == 105 and j8 == 110 and j9 == 103) or -- '"t":"ping'
+                                (j1 == 34 and j2 == 116 and j3 == 34 and j4 == 58 and j5 == 34 and j6 == 112 and j7 == 111 and j8 == 110 and j9 == 103)    -- '"t":"pong'
+    if not isPingPongLogIgnore then
         log('I', 'lanMultiplayer', 'Received packet from ' .. tostring(ip) .. ':' .. tostring(port) .. ' : ' .. rawMsg:sub(1, 120) .. '... (size: ' .. tostring(#rawMsg) .. ' bytes)')
     end
     
@@ -1124,6 +1272,14 @@ local function processPacket(rawMsg, ip, port)
                     log('I', 'lanMultiplayer', 'Reset remote vehicle damage.')
                 end
             end
+        elseif msgType == "damage" then
+            if remoteVehicleId then
+                local remoteVeh = be:getObjectByID(remoteVehicleId)
+                if remoteVeh then
+                    remoteVeh:queueLuaCommand(string.format("globalApplyDeformedNodes(%s)", jsonEncode(msg.nodes)))
+                    log('I', 'lanMultiplayer', 'Applied damage sync nodes to remote vehicle.')
+                end
+            end
         end
     end
 end
@@ -1147,8 +1303,9 @@ local function receivePackets()
             local isUpdate = false
             local seq = 0
             
-            -- 1. Check for binary update packet
-            if #data == 80 and data:sub(1, 4) == "DPUB" then
+            -- 1. Check for binary update packet (exact length 92, matching DPUB)
+            local m1, m2, m3, m4 = string.byte(data, 1, 4)
+            if #data == 92 and m1 == 68 and m2 == 80 and m3 == 85 and m4 == 66 then -- "DPUB"
                 isUpdate = true
                 local b1, b2, b3, b4 = string.byte(data, 5, 8)
                 seq = b1 + b2 * 256 + b3 * 65536 + b4 * 16777216
@@ -1156,8 +1313,14 @@ local function receivePackets()
             
             -- 2. Fallback to check for JSON update packet
             if not isUpdate then
-                isUpdate = data:sub(1, 7) == '{"t":"u"' or data:sub(1, 10) == '{"type":"u"'
-                if isUpdate then
+                local b1, b2, b3, b4, b5, b6, b7 = string.byte(data, 1, 7)
+                local isJsonUpdate = (b1 == 123 and b2 == 34 and b3 == 116 and b4 == 34 and b5 == 58 and b6 == 34 and b7 == 117) -- '{"t":"u"'
+                if not isJsonUpdate then
+                    local b8, b9, b10 = string.byte(data, 8, 10)
+                    isJsonUpdate = (b1 == 123 and b2 == 34 and b3 == 112 and b4 == 121 and b5 == 112 and b6 == 101 and b7 == 34 and b8 == 58 and b9 == 34 and b10 == 117) -- '{"type":"u"'
+                end
+                if isJsonUpdate then
+                    isUpdate = true
                     local seqStr = data:match('"s":(%d+)')
                     seq = seqStr and tonumber(seqStr) or 0
                 end
@@ -1182,8 +1345,9 @@ local function receivePackets()
             local isUpdate = false
             local seq = 0
             
-            -- 1. Check for binary update packet
-            if #data == 80 and data:sub(1, 4) == "DPUB" then
+            -- 1. Check for binary update packet (exact length 92, matching DPUB)
+            local m1, m2, m3, m4 = string.byte(data, 1, 4)
+            if #data == 92 and m1 == 68 and m2 == 80 and m3 == 85 and m4 == 66 then -- "DPUB"
                 isUpdate = true
                 local b1, b2, b3, b4 = string.byte(data, 5, 8)
                 seq = b1 + b2 * 256 + b3 * 65536 + b4 * 16777216
@@ -1191,8 +1355,14 @@ local function receivePackets()
             
             -- 2. Fallback to check for JSON update packet
             if not isUpdate then
-                isUpdate = data:sub(1, 7) == '{"t":"u"' or data:sub(1, 10) == '{"type":"u"'
-                if isUpdate then
+                local b1, b2, b3, b4, b5, b6, b7 = string.byte(data, 1, 7)
+                local isJsonUpdate = (b1 == 123 and b2 == 34 and b3 == 116 and b4 == 34 and b5 == 58 and b6 == 34 and b7 == 117) -- '{"t":"u"'
+                if not isJsonUpdate then
+                    local b8, b9, b10 = string.byte(data, 8, 10)
+                    isJsonUpdate = (b1 == 123 and b2 == 34 and b3 == 112 and b4 == 121 and b5 == 112 and b6 == 101 and b7 == 34 and b8 == 58 and b9 == 34 and b10 == 117) -- '{"type":"u"'
+                end
+                if isJsonUpdate then
+                    isUpdate = true
                     local seqStr = data:match('"s":(%d+)')
                     seq = seqStr and tonumber(seqStr) or 0
                 end
@@ -1311,6 +1481,20 @@ local function onUpdate(dtReal, dtSim)
                             lastMyVehicleConfig = config
                             log('I', 'lanMultiplayer', 'Vehicle change detected. Sending spawn packet.')
                             sendSpawn(model, config)
+                            
+                            -- Register electrics change notifications
+                            if core_vehicleBridge then
+                                core_vehicleBridge.registerValueChangeNotification(myVeh, 'rpm')
+                                core_vehicleBridge.registerValueChangeNotification(myVeh, 'wheelspeed')
+                                core_vehicleBridge.registerValueChangeNotification(myVeh, 'gearIndex')
+                                core_vehicleBridge.registerValueChangeNotification(myVeh, 'lights_state')
+                                core_vehicleBridge.registerValueChangeNotification(myVeh, 'signal_L')
+                                core_vehicleBridge.registerValueChangeNotification(myVeh, 'signal_R')
+                                core_vehicleBridge.registerValueChangeNotification(myVeh, 'hazard')
+                                core_vehicleBridge.registerValueChangeNotification(myVeh, 'fog')
+                                core_vehicleBridge.registerValueChangeNotification(myVeh, 'lightbar')
+                                core_vehicleBridge.registerValueChangeNotification(myVeh, 'horn')
+                            end
                         end
                     end
                     
@@ -1355,6 +1539,36 @@ local function onUpdate(dtReal, dtSim)
                     debugDrawer:drawTextAdvanced(pos, speedText, speedColor, true, true, ColorI(0, 0, 0, 128))
                 end
             end
+            
+            -- 4g. Check and sync player vehicle damage (every 1.0 second)
+            damageCheckTimer = damageCheckTimer + dtReal
+            if damageCheckTimer >= 1.0 then
+                damageCheckTimer = damageCheckTimer - 1.0
+                local myVeh = be:getPlayerVehicle(0)
+                if myVeh then
+                    local checkCmd = [[
+                    (function()
+                        local dmg = beamstate and beamstate.damage or 0
+                        if dmg > (lastReportedDmg or 0) then
+                            lastReportedDmg = dmg
+                            local deformed = {}
+                            for cid, node in pairs(v.data.nodes) do
+                                local pos = v.data.nodes[cid].pos
+                                local currentPos = obj:getNodePosition(cid)
+                                local dist = pos:distance(currentPos)
+                                if dist > 0.03 then
+                                    deformed[tostring(cid)] = {currentPos.x, currentPos.y, currentPos.z}
+                                end
+                            end
+                            if next(deformed) then
+                                obj:queueGameEngineLua(string.format("extensions.lanMultiplayer.reportDamage(%s)", jsonEncode(deformed)))
+                            end
+                        end
+                    end)()
+                    ]]
+                    myVeh:queueLuaCommand(checkCmd)
+                end
+            end
         end
     end)
     
@@ -1379,6 +1593,54 @@ local function onVehicleSpawned(id)
             spawnPending = false
             spawnPendingModel = nil
             log('I', 'lanMultiplayer', 'Successfully spawned remote vehicle with ID: ' .. tostring(id))
+            
+            -- Inject sync and damage helpers into vehicle Lua VM
+            local initScript = [[
+            globalSyncVeh = function(t, s, b, c, hb, rpm, gear, ws, lights, flags)
+                input.event('throttle', t, 1)
+                input.event('steering', s, 1)
+                input.event('brake', b, 1)
+                input.event('clutch', c, 1)
+                input.event('handbrake', hb, 1)
+                if mainEngine then
+                    mainEngine.rpm = rpm
+                    mainEngine.visualRPM = rpm
+                    mainEngine.inputAV = rpm * 0.104719755
+                end
+                if gearbox then
+                    gearbox.gearIndex = gear
+                end
+                electrics.values.rpm = rpm
+                electrics.values.rpmSpin = rpm
+                electrics.values.gearIndex = gear
+                electrics.values.gear = gear
+                electrics.values.wheelspeed = ws
+                if wheels then
+                    for _, w in ipairs(wheels.wheels) do
+                        w.angularVelocity = ws
+                        w.angularVelocityBrakeCouple = ws
+                    end
+                end
+                if electrics.setLightsState then
+                    electrics.setLightsState(bit.band(lights, 1) ~= 0 and 1 or 0)
+                    electrics.set_left_signal(bit.band(lights, 2) ~= 0)
+                    electrics.set_right_signal(bit.band(lights, 4) ~= 0)
+                    electrics.set_warn_signal(bit.band(lights, 8) ~= 0)
+                    electrics.set_fog_lights(bit.band(lights, 16) ~= 0)
+                    electrics.set_lightbar_signal(bit.band(lights, 32) ~= 0 and 1 or 0)
+                    electrics.horn(bit.band(lights, 64) ~= 0)
+                end
+            end
+            globalApplyDeformedNodes = function(nodes)
+                for cidStr, pos in pairs(nodes) do
+                    local cid = tonumber(cidStr)
+                    if cid then
+                        obj:setNodePosition(cid, vec3(pos[1], pos[2], pos[3]))
+                    end
+                end
+            end
+            ]]
+            veh:queueLuaCommand(initScript)
         end
     end
 end
@@ -1389,20 +1651,54 @@ local function onVehicleResetted(vehicleId)
     
     local myVeh = be:getPlayerVehicle(0)
     if myVeh and myVeh:getId() == vehicleId then
+        myVeh:queueLuaCommand("lastReportedDmg = 0")
         log('I', 'lanMultiplayer', 'Player reset their vehicle. Sending reset packet.')
         sendReset()
     end
 end
 
+local originalGCPause = 200
+
 -- Cleanup on unload
 local function onExtensionUnloaded()
+    collectgarbage("setpause", originalGCPause)
+    log('I', 'lanMultiplayer', 'GC Pause restored to ' .. tostring(originalGCPause))
     disconnect()
 end
 
 -- Extension loaded
 local function onExtensionLoaded()
     log('I', 'lanMultiplayer', 'LAN Multiplayer extension loaded.')
+    originalGCPause = collectgarbage("setpause", 800)
+    log('I', 'lanMultiplayer', 'GC Pause set to 800 (was ' .. tostring(originalGCPause) .. ')')
     loadSettings()
+end
+
+local function reportDamage(deformed)
+    if state == "CONNECTED" then
+        sendPacket({ type = "damage", nodes = deformed })
+    end
+end
+
+local function setGhostMode(enabled)
+    M.ghostModeEnabled = enabled
+    log('I', 'lanMultiplayer', 'Ghost mode set to: ' .. tostring(enabled))
+    notifyUI()
+end
+
+local function teleportToFriend()
+    if not remoteVehicleId then
+        log('W', 'lanMultiplayer', 'No remote vehicle to teleport to.')
+        return
+    end
+    local remoteVeh = be:getObjectByID(remoteVehicleId)
+    local myVeh = be:getPlayerVehicle(0)
+    if remoteVeh and myVeh then
+        local remotePos = remoteVeh:getPosition()
+        local remoteRot = remoteVeh:getRotation()
+        myVeh:setPosRot(remotePos.x, remotePos.y, remotePos.z + 2.0, remoteRot.x, remoteRot.y, remoteRot.z, remoteRot.w)
+        log('I', 'lanMultiplayer', 'Teleported to friend.')
+    end
 end
 
 -- API Exports
@@ -1417,6 +1713,9 @@ M.connect = connect
 M.disconnect = disconnect
 M.requestStatus = notifyUI
 M.setNickname = setNickname
+M.setGhostMode = setGhostMode
+M.teleportToFriend = teleportToFriend
+M.reportDamage = reportDamage
 
 -- Internal API exports for testing
 M.getInputsRaw = getInputsRaw

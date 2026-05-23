@@ -10,6 +10,7 @@ angular.module('beamng.apps')
       scope.role = "NONE";
       scope.nickname = "Player";
       scope.remoteNickname = "";
+      scope.ghostMode = false;
 
       scope.config = {
         ip: "127.0.0.1",
@@ -83,6 +84,17 @@ angular.module('beamng.apps')
         bngApi.engineLua('extensions.lanMultiplayer.disconnect()');
       };
 
+      // Toggle Ghost Mode
+      scope.toggleGhostMode = function() {
+        scope.ghostMode = !scope.ghostMode;
+        bngApi.engineLua('extensions.lanMultiplayer.setGhostMode(' + scope.ghostMode + ')');
+      };
+
+      // Teleport to Friend
+      scope.teleportToFriend = function() {
+        bngApi.engineLua('extensions.lanMultiplayer.teleportToFriend()');
+      };
+
       var isInitialized = false;
 
       // Handle status events from Lua engine
@@ -99,6 +111,9 @@ angular.module('beamng.apps')
           }
           if (data.remoteNickname !== undefined) {
             scope.remoteNickname = data.remoteNickname;
+          }
+          if (data.ghostMode !== undefined) {
+            scope.ghostMode = data.ghostMode;
           }
 
           scope.error = data.error || "";

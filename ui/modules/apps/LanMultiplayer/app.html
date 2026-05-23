@@ -191,6 +191,14 @@
       box-shadow: 0 6px 16px rgba(239, 68, 68, 0.4);
     }
 
+    .bng-mp-btn-green {
+      background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+      box-shadow: 0 4px 12px rgba(16, 185, 129, 0.25);
+    }
+    .bng-mp-btn-green:hover {
+      box-shadow: 0 6px 16px rgba(16, 185, 129, 0.4);
+    }
+
     .bng-mp-status-card {
       background: rgba(15, 23, 42, 0.4);
       border: 1px solid rgba(255, 255, 255, 0.05);
@@ -505,6 +513,17 @@
             </svg>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- Multiplayer Controls -->
+    <div ng-if="status == 'CONNECTED'" style="margin-bottom: 14px;">
+      <div style="font-size: 0.7rem; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px;">Controls</div>
+      <div style="display: flex; gap: 10px;">
+        <button class="bng-mp-btn" style="margin-top: 0; flex: 1;" ng-click="teleportToFriend()">Teleport</button>
+        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': ghostMode}" style="margin-top: 0; flex: 1;" ng-click="toggleGhostMode()">
+          Ghost: {{ghostMode ? 'ON' : 'OFF'}}
+        </button>
       </div>
     </div>
 

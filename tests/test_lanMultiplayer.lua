@@ -47,6 +47,7 @@ local function setup()
     be:reset()
     core_vehicles:reset()
     core_levels:reset()
+    core_vehicleBridge:reset()
     guihooks:reset()
     debugDrawer:reset()
     
@@ -201,6 +202,20 @@ tests.testFFIBinarySerialization = function()
     
     be.playerVehicle = myVeh
     
+    -- Mock cached electrics for vehicle 1
+    core_vehicleBridge.cachedData[1] = {
+        rpm = 1500,
+        wheelspeed = 25.5,
+        gearIndex = 3,
+        lights_state = 1,
+        signal_L = true,
+        signal_R = false,
+        hazard = false,
+        fog = true,
+        lightbar = 0,
+        horn = false
+    }
+    
     -- Mock driver inputs
     input.state.throttle.val = 0.9
     input.state.steering.val = 0.15
@@ -215,7 +230,7 @@ tests.testFFIBinarySerialization = function()
     -- Validate packet structure
     assertEqual(1, #sock._sent)
     local sentPacket = sock._sent[1].data
-    assertEqual(80, #sentPacket, "FFI update packet must be exactly 80 bytes")
+    assertEqual(92, #sentPacket, "FFI update packet must be exactly 92 bytes")
     
     -- Validate FFI packet contents
     local ptr = ffi.cast("const uint32_t*", ffi.cast("const char*", sentPacket))
@@ -261,11 +276,15 @@ tests.testFFIBinarySerialization = function()
     assertNear(-0.02, targetAngVel.y)
     assertNear(0.1, targetAngVel.z)
     
-    -- Validate control inputs applied to remote vehicle Lua VM
+    -- Validate control inputs applied to remote vehicle Lua VM via globalSyncVeh helper
     assertEqual(1, #remoteVeh.queuedCommands)
     local cmd = remoteVeh.queuedCommands[1]
-    assertTrue(cmd:find("throttle', 0.900000") ~= nil, "Remote throttle command check failed")
-    assertTrue(cmd:find("steering', 0.150000") ~= nil, "Remote steering command check failed")
+    assertTrue(cmd:find("globalSyncVeh") ~= nil, "Remote vehicle VM call should be globalSyncVeh")
+    assertTrue(cmd:find("0.900000,0.150000") ~= nil, "Inputs must be passed to globalSyncVeh")
+    assertTrue(cmd:find("1500") ~= nil, "RPM must be passed to globalSyncVeh")
+    assertTrue(cmd:find("25.5") ~= nil, "Wheel speed must be passed to globalSyncVeh")
+    assertTrue(cmd:find("3") ~= nil, "Gear must be passed to globalSyncVeh")
+    assertTrue(cmd:find("19") ~= nil, "Lights bitmask (19) must be passed to globalSyncVeh")
 end
 
 -- 9. Adaptive Telemetry Rate Logic Test
