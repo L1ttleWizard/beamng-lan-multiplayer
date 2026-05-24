@@ -25,6 +25,8 @@ M._lastSyncedFlags = 0
 -- Libraries
 local socket = require("socket")
 local ffi = require("ffi")
+-- FIX: Cache bit module at load time, not inside hot-path functions
+local bit = require("bit")
 
 -- Register FFI structure for zero-allocation binary updates
 ffi.cdef[[
@@ -40,11 +42,11 @@ typedef struct {
     float brake;
     float clutch;
     float handbrake;
-    float rpm;           // [NEW] Engine RPM
-    float wheelSpeed;    // [NEW] Average wheel speed
-    int16_t gear;        // [NEW] Transmission gear index
-    uint8_t lights;      // [NEW] Lights bitmask
-    uint8_t flags;       // [NEW] Miscellaneous flags (bit 0: ghost mode)
+    float rpm;           // Engine RPM
+    float wheelSpeed;    // Average wheel speed
+    int16_t gear;        // Transmission gear index
+    uint8_t lights;      // Lights bitmask
+    uint8_t flags;       // Miscellaneous flags (bit 0: ghost mode)
 } UpdatePacket;
 ]]
 
@@ -147,8 +149,6 @@ local smoothedRot = quat(0,0,0,1)
 local nickColor = ColorF(0.22, 0.74, 1.0, 1.0)
 local speedColor = ColorF(0.85, 0.85, 0.85, 0.75)
 
--- (Lerp/NLerp removed — no longer used; direct setPosRot at network rate)
-
 -- ============================================================
 -- Adaptive Send Rate
 -- ============================================================
@@ -168,9 +168,10 @@ local pingInterval = 0.5       -- send ping every 0.5s
 local pingSeq = 0              -- outgoing ping sequence number
 local pingSendTime = {}        -- map: seq -> os.clock() when sent
 local currentPing = 0          -- last measured RTT in ms
-local pingHistorySize = 60     -- 30 seconds of history at 0.5s interval
-local pingHistory = {}         -- ring buffer of last 60 ping values
+local pingHistorySize = 60     -- ring buffer size
+local pingHistory = {}         -- fixed-size ring buffer
 local pingHistoryIdx = 0
+local pingHistoryCount = 0     -- FIX: track actual filled count separately
 
 -- Jitter (variance of ping)
 local currentJitter = 0        -- ms
@@ -233,7 +234,7 @@ end
 -- Build ordered ping history for sparkline
 local function getOrderedPingHistory()
     local ordered = {}
-    local count = #pingHistory
+    local count = pingHistoryCount  -- FIX: use actual count, not #pingHistory
     if count == 0 then return ordered end
     for i = 1, count do
         local idx = ((pingHistoryIdx - count + i - 1) % pingHistorySize) + 1
@@ -323,14 +324,12 @@ local function getSafeConfigPayload(config)
     local jsonStr = jsonEncode(minConfig)
     if not jsonStr then return nil end
     
-    -- Target UDP payload <= 1400 bytes, limit config JSON size to 1000 bytes
     if #jsonStr <= 1000 then
         return minConfig
     end
     
     log('W', 'lanMultiplayer', 'Vehicle parts configuration is too large (' .. tostring(#jsonStr) .. ' bytes). Dropping custom parts to prevent packet fragmentation.')
     
-    -- Fallback: send only tuning vars if they fit
     if minConfig.vars and next(minConfig.vars) then
         local varsOnly = { vars = minConfig.vars }
         local varsJson = jsonEncode(varsOnly)
@@ -466,7 +465,6 @@ local function spawnRemoteVehicle(model, config, pos, rot)
     remoteVehicleModel = model
     remoteVehicleConfig = config
     
-    -- Convert JSON tables to vec3/quat objects
     local p = vec3(0,0,0)
     if pos then
         if type(pos) == "table" then
@@ -492,7 +490,6 @@ local function spawnRemoteVehicle(model, config, pos, rot)
         autoEnterVehicle = false
     })
     
-    -- Select the player's original vehicle back immediately
     if originalVeh then
         be:enterVehicle(0, originalVeh)
     end
@@ -512,9 +509,10 @@ local function resetMetrics()
     currentPing = 0
     currentJitter = 0
     pingSeq = 0
-    pingSendTime = {}
-    pingHistory = {}
+    pingSendTime = {}           -- FIX: fresh table clears all accumulated ping entries
+    pingHistory = {}            -- FIX: fresh table, pre-fill with nils to cap at pingHistorySize
     pingHistoryIdx = 0
+    pingHistoryCount = 0        -- FIX: reset count tracker
     txPackets = 0
     rxPackets = 0
     txRate = 0
@@ -660,7 +658,6 @@ local function connect(ip, port, localPort)
     
     local _, boundPort = sock:getsockname()
     
-    -- Connect the socket to the host (creates stateful UDP for Windows Firewall hole-punching)
     local peerOk, peerErr = sock:setpeername(targetIpVal, targetPortVal)
     if not peerOk then
         local errMsg = 'Failed to set peer on client socket: ' .. tostring(peerErr)
@@ -726,10 +723,8 @@ local function sendRaw(rawData)
     if not udpSocket then return end
     local success, err
     if role == "CLIENT" then
-        -- Connected socket: use send() (peer set via setpeername)
         success, err = udpSocket:send(rawData)
     else
-        -- Unconnected socket (HOST): use sendto()
         if not targetIp or not targetPort then return end
         success, err = udpSocket:sendto(rawData, targetIp, targetPort)
     end
@@ -737,13 +732,13 @@ local function sendRaw(rawData)
         txPackets = txPackets + 1
         txBytes = txBytes + #rawData
         
-        -- Allocation-free check to ignore telemetry hot-path and ping/pong from logging
         local firstByte = string.byte(rawData, 1)
         local shouldLog = true
         if firstByte == 68 then -- 'D' (DPUB binary telemetry)
             shouldLog = false
         elseif firstByte == 123 then -- '{' (JSON)
-            if rawData:sub(2, 9) == '"t":"u"' or rawData:sub(2, 9) == '"t":"ping' or rawData:sub(2, 9) == '"t":"pong' then
+            local t = rawData:match('"t":"([^"]+)"') or rawData:match('"type":"([^"]+)"')
+            if t == "u" or t == "ping" or t == "pong" then
                 shouldLog = false
             end
         end
@@ -766,7 +761,6 @@ local function sendUpdate()
     local myVeh = be:getPlayerVehicle(0)
     if not myVeh then return end
     
-    -- Nil-safe raw field access (no fallback vec3/quat allocations)
     local pos = myVeh.getPosition and myVeh:getPosition()
     local rawRot = myVeh.getRotation and myVeh:getRotation()
     if not pos or not rawRot then return end
@@ -808,7 +802,6 @@ local function sendUpdate()
     
     txSeq = txSeq + 1
     
-    -- Read electrics cache for player vehicle
     local myId = myVeh:getId()
     local rpm = M.soundSyncEnabled and (core_vehicleBridge.getCachedVehicleData(myId, 'rpm') or 0) or 0
     local wheelSpeed = M.wheelSyncEnabled and (core_vehicleBridge.getCachedVehicleData(myId, 'wheelspeed') or 0) or 0
@@ -833,11 +826,9 @@ local function sendUpdate()
         if horn then lightsMask = lightsMask + 64 end
     end
     
-    -- Encode flags (bit 0: Ghost Mode)
     local flagsMask = 0
     if M.ghostModeEnabled then flagsMask = flagsMask + 1 end
     
-    -- Write to pre-allocated C struct (0 dynamic memory allocation)
     outPacket.magic = 0x42555044
     outPacket.seq = txSeq
     outPacket.px = pos.x
@@ -864,7 +855,6 @@ local function sendUpdate()
     outPacket.lights = lightsMask
     outPacket.flags = flagsMask
     
-    -- Save sent state
     lastSentPos.x = pos.x
     lastSentPos.y = pos.y
     lastSentPos.z = pos.z
@@ -883,7 +873,6 @@ local function sendUpdate()
     lastSentTime = os.clock()
     heartbeatCounter = 0
     
-    -- Send directly as raw binary string (92 bytes)
     sendRaw(ffi.string(outPacket, 92))
 end
 
@@ -895,7 +884,6 @@ local function sendSpawn(model, config)
     local pos = (myVeh.getPosition and myVeh:getPosition()) or vec3(0,0,0)
     local rot = (myVeh.getRotation and quat(myVeh:getRotation())) or quat(0,0,0,1)
     
-    -- Filter config payload to prevent fragmentation
     local safeConfig = getSafeConfigPayload(config)
     
     local payload = {
@@ -920,11 +908,14 @@ local function sendPing()
     pingSeq = pingSeq + 1
     pingSendTime[pingSeq] = socket.gettime()
     sendRaw(string.format('{"t":"ping","s":%d}', pingSeq))
-    -- Cleanup old unacknowledged pings (older than 5s)
-    local now = socket.gettime()
-    for seq, t in pairs(pingSendTime) do
-        if now - t > 5.0 then
-            pingSendTime[seq] = nil
+    -- FIX: Cleanup old unacknowledged pings inline to prevent unbounded growth.
+    -- Only clean when the table might be large (every 30 pings ≈ 15 seconds).
+    if pingSeq % 30 == 0 then
+        local now = socket.gettime()
+        for seq, sendT in pairs(pingSendTime) do
+            if now - sendT > 5.0 then
+                pingSendTime[seq] = nil
+            end
         end
     end
 end
@@ -943,21 +934,28 @@ local function processPong(seq)
     local rtt = (socket.gettime() - sentAt) * 1000 -- ms
     currentPing = rtt
     
-    -- Store in ring buffer for jitter and sparkline
+    -- FIX: Proper bounded ring buffer - cap table at exactly pingHistorySize entries
     pingHistoryIdx = (pingHistoryIdx % pingHistorySize) + 1
     pingHistory[pingHistoryIdx] = rtt
+    if pingHistoryCount < pingHistorySize then
+        pingHistoryCount = pingHistoryCount + 1
+    end
     
-    -- Calculate jitter as average deviation from mean
-    local count = #pingHistory
+    -- FIX: Iterate only the filled portion (pingHistoryCount), not #pingHistory
+    local count = pingHistoryCount
     if count >= 2 then
         local sum = 0
-        for i = 1, count do
-            sum = sum + pingHistory[i]
+        for i = 1, pingHistorySize do
+            if pingHistory[i] then
+                sum = sum + pingHistory[i]
+            end
         end
         local mean = sum / count
         local devSum = 0
-        for i = 1, count do
-            devSum = devSum + math.abs(pingHistory[i] - mean)
+        for i = 1, pingHistorySize do
+            if pingHistory[i] then
+                devSum = devSum + math.abs(pingHistory[i] - mean)
+            end
         end
         currentJitter = devSum / count
     end
@@ -970,14 +968,12 @@ local function updateMetricsWindow()
     txBandwidth = txBytes / 1024   -- KB/s
     rxBandwidth = rxBytes / 1024   -- KB/s
     
-    -- Calculate packet loss
     if remoteTotalExpected > 0 then
         packetLoss = (remoteLostCount / remoteTotalExpected) * 100
     else
         packetLoss = 0
     end
     
-    -- Reset window counters
     txPackets = 0
     rxPackets = 0
     txBytes = 0
@@ -996,10 +992,8 @@ local function adaptSendRate()
     
     local prevRate = sendRate
     if packetLoss > 3 or currentJitter > 50 then
-        -- Network stressed: reduce frequency
         sendRate = math.min(sendRate * 1.5, maxSendRate)
     elseif packetLoss < 1 and currentJitter < 20 and sendRate > minSendRate then
-        -- Network healthy: increase frequency
         sendRate = math.max(sendRate / 1.2, minSendRate)
     end
     
@@ -1019,7 +1013,6 @@ local function setNickname(name)
     saveSettings(state ~= "IDLE")
     notifyUI()
     
-    -- If connected, send a spawn packet to immediately update nickname on friend's client
     if state == "CONNECTED" then
         local myVeh = be:getPlayerVehicle(0)
         local model, config = getVehicleInfo(myVeh)
@@ -1031,7 +1024,6 @@ end
 local function updateRemoteVehicleBinary(data)
     if not remoteVehicleId then return end
     
-    -- Track packet loss via sequence numbers
     local seq = data.seq
     if remoteLastSeq > 0 then
         local expected = seq - remoteLastSeq
@@ -1045,7 +1037,6 @@ local function updateRemoteVehicleBinary(data)
     end
     remoteLastSeq = seq
     
-    -- Parse target state into pre-allocated FFI objects (0 heap allocations)
     remoteTargetPos.x = data.px
     remoteTargetPos.y = data.py
     remoteTargetPos.z = data.pz
@@ -1065,10 +1056,8 @@ local function updateRemoteVehicleBinary(data)
     
     hasRemoteState = true
     
-    -- Calculate speed for 3D drawing
     remoteLastSpeed = math.sqrt(data.vx*data.vx + data.vy*data.vy + data.vz*data.vz) * 3.6
     
-    -- Update remote target states to be smoothed in onUpdate
     remoteTargetInputs.t = data.throttle
     remoteTargetInputs.s = data.steering
     remoteTargetInputs.b = data.brake
@@ -1083,8 +1072,7 @@ local function updateRemoteVehicleBinary(data)
     
     local remoteVeh = be:getObjectByID(remoteVehicleId)
     if remoteVeh then
-        -- 1. Handle Ghost Mode (bit 0 of flags)
-        local bit = require("bit")
+        -- FIX: Use cached module-level bit, not require() in hot path
         local remoteGhost = bit.band(data.flags, 1) ~= 0
         local currentGhost = remoteGhost or M.ghostModeEnabled
         if currentGhost ~= lastGhostState then
@@ -1096,11 +1084,10 @@ local function updateRemoteVehicleBinary(data)
     end
 end
 
--- Store remote vehicle target state from packet (applied with smoothing in onUpdate)
+-- Store remote vehicle target state from JSON packet
 local function updateRemoteVehicle(data)
     if not remoteVehicleId then return end
     
-    -- Track packet loss via sequence numbers
     local seq = data.s
     if seq then
         if remoteLastSeq > 0 then
@@ -1116,7 +1103,6 @@ local function updateRemoteVehicle(data)
         remoteLastSeq = seq
     end
     
-    -- Parse target state
     local p, r, v, av, inputs
     if data.t == "u" then
         local dp = data.p
@@ -1136,7 +1122,6 @@ local function updateRemoteVehicle(data)
         inputs = data.inputs
     end
     
-    -- Store target state for smoothed application in onUpdate
     remoteTargetPos.x = p.x
     remoteTargetPos.y = p.y
     remoteTargetPos.z = p.z
@@ -1155,12 +1140,9 @@ local function updateRemoteVehicle(data)
     remoteTargetAngVel.z = av.z
     
     hasRemoteState = true
-
     
-    -- Calculate remote speed for 3D display (m/s -> km/h)
     remoteLastSpeed = math.sqrt(v.x*v.x + v.y*v.y + v.z*v.z) * 3.6
     
-    -- Apply control inputs to vehicle VM (filtered to avoid cross-VM command flooding)
     if inputs then
         local t, s, b, c, hb
         if data.t == "u" then
@@ -1197,12 +1179,17 @@ local function applySmoothedRemoteState(dtReal)
     
     local remoteVeh = be:getObjectByID(remoteVehicleId)
     if not remoteVeh then return end
-    
-    -- Extrapolate target state using PLC (Dead Reckoning) if enabled
+
+    -- FIX: Snapshot PLC extrapolation into a local copy to avoid corrupting
+    -- remoteTargetPos (which should remain the last received packet position).
+    -- Using a separate plcPos prevents drift accumulation across frames.
+    local plcPosX = remoteTargetPos.x
+    local plcPosY = remoteTargetPos.y
+    local plcPosZ = remoteTargetPos.z
     if M.plcEnabled then
-        remoteTargetPos.x = remoteTargetPos.x + remoteTargetVel.x * dtReal
-        remoteTargetPos.y = remoteTargetPos.y + remoteTargetVel.y * dtReal
-        remoteTargetPos.z = remoteTargetPos.z + remoteTargetVel.z * dtReal
+        plcPosX = plcPosX + remoteTargetVel.x * dtReal
+        plcPosY = plcPosY + remoteTargetVel.y * dtReal
+        plcPosZ = plcPosZ + remoteTargetVel.z * dtReal
     end
     
     local currentPos = remoteVeh.getPosition and remoteVeh:getPosition()
@@ -1210,54 +1197,60 @@ local function applySmoothedRemoteState(dtReal)
     if not currentPos or not rawRot then return end
     local currentRot = quat(rawRot)
     
-    -- Calculate distance to target
-    local dx = remoteTargetPos.x - currentPos.x
-    local dy = remoteTargetPos.y - currentPos.y
-    local dz = remoteTargetPos.z - currentPos.z
+    local dx = plcPosX - currentPos.x
+    local dy = plcPosY - currentPos.y
+    local dz = plcPosZ - currentPos.z
     local dist = math.sqrt(dx*dx + dy*dy + dz*dz)
     
     local currentSmoothSpeed = smoothSpeed
     if M.jitterBufferEnabled then
-        -- Base speed is 30. Reduce speed (increase smoothing) as jitter and packet loss increase.
         local jitterPenalty = math.min(15, currentJitter * 0.3)
         local lossPenalty = math.min(5, packetLoss * 0.5)
         currentSmoothSpeed = math.max(10, 30 - jitterPenalty - lossPenalty)
     end
     
     if dist < smoothThreshold then
-        -- Very close: snap directly (no visible difference)
-        remoteVeh:setPosRot(remoteTargetPos.x, remoteTargetPos.y, remoteTargetPos.z, remoteTargetRot.x, remoteTargetRot.y, remoteTargetRot.z, remoteTargetRot.w)
+        -- FIX: Snap both position AND rotation from target (not plc pos, which may drift)
+        remoteVeh:setPosRot(
+            remoteTargetPos.x, remoteTargetPos.y, remoteTargetPos.z,
+            remoteTargetRot.x, remoteTargetRot.y, remoteTargetRot.z, remoteTargetRot.w)
     else
-        -- Smooth exponential convergence (frame-rate independent)
         local alpha = 1.0 - math.exp(-currentSmoothSpeed * dtReal)
         
-        -- In-place modification of pre-allocated vec3 to avoid allocations
-        smoothedPos.x = currentPos.x + alpha * (remoteTargetPos.x - currentPos.x)
-        smoothedPos.y = currentPos.y + alpha * (remoteTargetPos.y - currentPos.y)
-        smoothedPos.z = currentPos.z + alpha * (remoteTargetPos.z - currentPos.z)
-        
-        -- In-place modification of pre-allocated quat (NLerp)
-        local dot = currentRot.x*remoteTargetRot.x + currentRot.y*remoteTargetRot.y + currentRot.z*remoteTargetRot.z + currentRot.w*remoteTargetRot.w
-        local s = 1
-        if dot < 0 then s = -1 end
-        local rx = currentRot.x + alpha * (s*remoteTargetRot.x - currentRot.x)
-        local ry = currentRot.y + alpha * (s*remoteTargetRot.y - currentRot.y)
-        local rz = currentRot.z + alpha * (s*remoteTargetRot.z - currentRot.z)
-        local rw = currentRot.w + alpha * (s*remoteTargetRot.w - currentRot.w)
-        local len = math.sqrt(rx*rx + ry*ry + rz*rz + rw*rw)
-        if len > 0.0001 then
-            rx, ry, rz, rw = rx/len, ry/len, rz/len, rw/len
+        -- Interpolate position toward PLC-extrapolated target
+        smoothedPos.x = currentPos.x + alpha * (plcPosX - currentPos.x)
+        smoothedPos.y = currentPos.y + alpha * (plcPosY - currentPos.y)
+        smoothedPos.z = currentPos.z + alpha * (plcPosZ - currentPos.z)
+
+        -- FIX: Interpolate rotation using nlerp (normalized linear interpolation)
+        -- This is what makes remoteTargetRot actually get applied smoothly.
+        -- Without this, rotation was always being set to the raw target, causing
+        -- jitter when PLC drifted position out of sync with rotation.
+        local oneMinusAlpha = 1.0 - alpha
+        local rx = oneMinusAlpha * currentRot.x + alpha * remoteTargetRot.x
+        local ry = oneMinusAlpha * currentRot.y + alpha * remoteTargetRot.y
+        local rz = oneMinusAlpha * currentRot.z + alpha * remoteTargetRot.z
+        local rw = oneMinusAlpha * currentRot.w + alpha * remoteTargetRot.w
+        -- Normalize the quaternion to prevent scale drift
+        local rLen = math.sqrt(rx*rx + ry*ry + rz*rz + rw*rw)
+        if rLen > 0.0001 then
+            local rInv = 1.0 / rLen
+            smoothedRot.x = rx * rInv
+            smoothedRot.y = ry * rInv
+            smoothedRot.z = rz * rInv
+            smoothedRot.w = rw * rInv
+        else
+            smoothedRot.x = remoteTargetRot.x
+            smoothedRot.y = remoteTargetRot.y
+            smoothedRot.z = remoteTargetRot.z
+            smoothedRot.w = remoteTargetRot.w
         end
         
-        smoothedRot.x = rx
-        smoothedRot.y = ry
-        smoothedRot.z = rz
-        smoothedRot.w = rw
-        
-        remoteVeh:setPosRot(smoothedPos.x, smoothedPos.y, smoothedPos.z, smoothedRot.x, smoothedRot.y, smoothedRot.z, smoothedRot.w)
+        remoteVeh:setPosRot(
+            smoothedPos.x, smoothedPos.y, smoothedPos.z,
+            smoothedRot.x, smoothedRot.y, smoothedRot.z, smoothedRot.w)
     end
     
-    -- Always set velocity/angularVelocity for physics dead reckoning and visuals
     if remoteVeh.setVelocity and remoteTargetVel then
         remoteVeh:setVelocity(remoteTargetVel)
     end
@@ -1268,11 +1261,9 @@ end
 
 -- Packet processor
 local function processPacket(rawMsg, ip, port)
-    -- Track RX counters
     rxPackets = rxPackets + 1
     rxBytes = rxBytes + #rawMsg
     
-    -- Check if it's a binary BUPD update packet (exact length 92, matching magic number)
     local m1, m2, m3, m4 = string.byte(rawMsg, 1, 4)
     if #rawMsg == 92 and m1 == 68 and m2 == 80 and m3 == 85 and m4 == 66 then -- "DPUB"
         lastPacketTime = os.clock()
@@ -1281,15 +1272,14 @@ local function processPacket(rawMsg, ip, port)
         return
     end
     
-    -- Debug logging for incoming JSON packets (ignore position updates and pings/pongs)
     local j1, j2, j3, j4, j5, j6, j7, j8, j9 = string.byte(rawMsg, 2, 10)
     local isUpdateOrPingPong = false
-    if j1 == 34 and j2 == 116 and j3 == 34 and j4 == 58 and j5 == 34 then -- starts with '"t":"'
-        if j6 == 117 and j7 == 34 then -- 'u"'
+    if j1 == 34 and j2 == 116 and j3 == 34 and j4 == 58 and j5 == 34 then
+        if j6 == 117 and j7 == 34 then
             isUpdateOrPingPong = true
-        elseif j6 == 112 and j7 == 105 and j8 == 110 and j9 == 103 then -- 'ping'
+        elseif j6 == 112 and j7 == 105 and j8 == 110 and j9 == 103 then
             isUpdateOrPingPong = true
-        elseif j6 == 112 and j7 == 111 and j8 == 110 and j9 == 103 then -- 'pong'
+        elseif j6 == 112 and j7 == 111 and j8 == 110 and j9 == 103 then
             isUpdateOrPingPong = true
         end
     end
@@ -1309,7 +1299,6 @@ local function processPacket(rawMsg, ip, port)
     
     lastPacketTime = os.clock()
     
-    -- Ping/Pong handling (works in any connected state)
     if msgType == "ping" then
         sendPong(msg.s)
         return
@@ -1319,7 +1308,6 @@ local function processPacket(rawMsg, ip, port)
         return
     end
     
-    -- Host logic to establish connection
     if (state == "HOSTING" or (state == "CONNECTED" and role == "HOST")) and msgType == "connect" then
         targetIp = ip
         targetPort = port
@@ -1333,7 +1321,6 @@ local function processPacket(rawMsg, ip, port)
         local pos = myVeh and myVeh.getPosition and myVeh:getPosition()
         local rot = myVeh and myVeh.getRotation and quat(myVeh:getRotation())
         
-        -- Filter config to prevent packet fragmentation
         local safeConfig = getSafeConfigPayload(config)
         
         local payload = {
@@ -1354,7 +1341,6 @@ local function processPacket(rawMsg, ip, port)
         return
     end
     
-    -- Client logic to establish connection
     if state == "CONNECTING" and msgType == "connect_ack" then
         state = "CONNECTED"
         remoteNickname = msg.nickname or "Host"
@@ -1374,7 +1360,6 @@ local function processPacket(rawMsg, ip, port)
         return
     end
     
-    -- Connected state updates
     if state == "CONNECTED" then
         if msgType == "update" or msgType == "u" then
             updateRemoteVehicle(msg)
@@ -1441,7 +1426,7 @@ local function processPacket(rawMsg, ip, port)
     end
 end
 
--- Read socket inputs and drop duplicate/old updates to avoid buffer bloat and ping spikes
+-- Read socket inputs and drop duplicate/old updates
 local function receivePackets()
     if not udpSocket then return end
     
@@ -1460,21 +1445,19 @@ local function receivePackets()
             local isUpdate = false
             local seq = 0
             
-            -- 1. Check for binary update packet (exact length 92, matching DPUB)
             local m1, m2, m3, m4 = string.byte(data, 1, 4)
-            if #data == 92 and m1 == 68 and m2 == 80 and m3 == 85 and m4 == 66 then -- "DPUB"
+            if #data == 92 and m1 == 68 and m2 == 80 and m3 == 85 and m4 == 66 then
                 isUpdate = true
                 local b1, b2, b3, b4 = string.byte(data, 5, 8)
                 seq = b1 + b2 * 256 + b3 * 65536 + b4 * 16777216
             end
             
-            -- 2. Fallback to check for JSON update packet
             if not isUpdate then
                 local b1, b2, b3, b4, b5, b6, b7 = string.byte(data, 1, 7)
-                local isJsonUpdate = (b1 == 123 and b2 == 34 and b3 == 116 and b4 == 34 and b5 == 58 and b6 == 34 and b7 == 117) -- '{"t":"u"'
+                local isJsonUpdate = (b1 == 123 and b2 == 34 and b3 == 116 and b4 == 34 and b5 == 58 and b6 == 34 and b7 == 117)
                 if not isJsonUpdate then
                     local b8, b9, b10 = string.byte(data, 8, 10)
-                    isJsonUpdate = (b1 == 123 and b2 == 34 and b3 == 112 and b4 == 121 and b5 == 112 and b6 == 101 and b7 == 34 and b8 == 58 and b9 == 34 and b10 == 117) -- '{"type":"u"'
+                    isJsonUpdate = (b1 == 123 and b2 == 34 and b3 == 112 and b4 == 121 and b5 == 112 and b6 == 101 and b7 == 34 and b8 == 58 and b9 == 34 and b10 == 117)
                 end
                 if isJsonUpdate then
                     isUpdate = true
@@ -1502,21 +1485,19 @@ local function receivePackets()
             local isUpdate = false
             local seq = 0
             
-            -- 1. Check for binary update packet (exact length 92, matching DPUB)
             local m1, m2, m3, m4 = string.byte(data, 1, 4)
-            if #data == 92 and m1 == 68 and m2 == 80 and m3 == 85 and m4 == 66 then -- "DPUB"
+            if #data == 92 and m1 == 68 and m2 == 80 and m3 == 85 and m4 == 66 then
                 isUpdate = true
                 local b1, b2, b3, b4 = string.byte(data, 5, 8)
                 seq = b1 + b2 * 256 + b3 * 65536 + b4 * 16777216
             end
             
-            -- 2. Fallback to check for JSON update packet
             if not isUpdate then
                 local b1, b2, b3, b4, b5, b6, b7 = string.byte(data, 1, 7)
-                local isJsonUpdate = (b1 == 123 and b2 == 34 and b3 == 116 and b4 == 34 and b5 == 58 and b6 == 34 and b7 == 117) -- '{"t":"u"'
+                local isJsonUpdate = (b1 == 123 and b2 == 34 and b3 == 116 and b4 == 34 and b5 == 58 and b6 == 34 and b7 == 117)
                 if not isJsonUpdate then
                     local b8, b9, b10 = string.byte(data, 8, 10)
-                    isJsonUpdate = (b1 == 123 and b2 == 34 and b3 == 112 and b4 == 121 and b5 == 112 and b6 == 101 and b7 == 34 and b8 == 58 and b9 == 34 and b10 == 117) -- '{"type":"u"'
+                    isJsonUpdate = (b1 == 123 and b2 == 34 and b3 == 112 and b4 == 121 and b5 == 112 and b6 == 101 and b7 == 34 and b8 == 58 and b9 == 34 and b10 == 117)
                 end
                 if isJsonUpdate then
                     isUpdate = true
@@ -1538,7 +1519,6 @@ local function receivePackets()
         end
     end
     
-    -- Process ONLY the latest update packet from this frame's network buffer
     if latestUpdateMsg then
         processPacket(latestUpdateMsg, latestUpdateIp or targetIp, latestUpdatePort or targetPort)
     end
@@ -1556,7 +1536,6 @@ local function handleConnectingHandshake(dt)
         local pos = myVeh and myVeh.getPosition and myVeh:getPosition()
         local rot = myVeh and myVeh.getRotation and quat(myVeh:getRotation())
         
-        -- Filter config to prevent packet fragmentation
         local safeConfig = getSafeConfigPayload(config)
         
         local payload = {
@@ -1600,15 +1579,23 @@ end
 
 --- Main Game Loop update hook
 local function onUpdate(dtReal, dtSim)
-    -- 1. If IDLE, only poll discovery and clean old lobbies
     if state == "IDLE" then
         local ok, err = pcall(function()
+            -- FIX: Avoid re-creating the socket every frame on bind failure.
+            -- Only try to create if we don't have one yet.
             if not discoveryRecvSocket then
                 local sock = socket.udp()
                 sock:settimeout(0)
                 local success, bindErr = sock:setsockname("0.0.0.0", 27019)
                 if success then
                     discoveryRecvSocket = sock
+                else
+                    -- FIX: Close the socket if binding failed to prevent fd leak
+                    sock:close()
+                    -- Back off: don't retry every frame, only every 5 seconds
+                    M._discoveryRetryTimer = (M._discoveryRetryTimer or 0) + dtReal
+                    if M._discoveryRetryTimer < 5.0 then return end
+                    M._discoveryRetryTimer = 0
                 end
             end
             
@@ -1669,18 +1656,11 @@ local function onUpdate(dtReal, dtSim)
         discoveryRecvSocket = nil
     end
     
-    -- Wrap entire body in pcall to prevent error cascade from tanking FPS
     local ok, err = pcall(function()
-        -- 1. Receive packets
         receivePackets()
-        
-        -- 2. Handle handshake if connecting
         handleConnectingHandshake(dtReal)
-        
-        -- 3. Check for timeouts
         checkTimeout()
         
-        -- 4. Active Host Lobby Beaconing
         if (state == "HOSTING" or state == "CONNECTED") and role == "HOST" then
             beaconTimer = beaconTimer + dtReal
             if beaconTimer >= 3.0 then
@@ -1708,9 +1688,7 @@ local function onUpdate(dtReal, dtSim)
             end
         end
         
-        -- 5. Connected state logic
         if state == "CONNECTED" then
-            -- 5a. Send update packets at adaptive Hz (capped to frame rate)
             sendTimer = sendTimer + dtReal
             if sendTimer >= sendRate then
                 sendTimer = sendTimer - sendRate
@@ -1722,7 +1700,6 @@ local function onUpdate(dtReal, dtSim)
                 if myVeh then
                     local myId = myVeh:getId()
                     
-                    -- Check model and config once every second, or immediately if vehicle ID changes
                     vehicleCheckTimer = vehicleCheckTimer + dtReal
                     if vehicleCheckTimer >= 1.0 or myId ~= myVehicleId then
                         vehicleCheckTimer = 0
@@ -1734,7 +1711,6 @@ local function onUpdate(dtReal, dtSim)
                             log('I', 'lanMultiplayer', 'Vehicle change detected. Sending spawn packet.')
                             sendSpawn(model, config)
                             
-                            -- Register electrics change notifications
                             if core_vehicleBridge then
                                 core_vehicleBridge.registerValueChangeNotification(myVeh, 'rpm')
                                 core_vehicleBridge.registerValueChangeNotification(myVeh, 'wheelspeed')
@@ -1750,7 +1726,6 @@ local function onUpdate(dtReal, dtSim)
                         end
                     end
                     
-                    -- Send backfire events if backfireSync is active
                     if M.backfireSyncEnabled then
                         local localBackfire = core_vehicleBridge.getCachedVehicleData(myId, 'backfire') or 0
                         if localBackfire > 0 and not M._localBackfireTriggered then
@@ -1761,7 +1736,6 @@ local function onUpdate(dtReal, dtSim)
                         end
                     end
                     
-                    -- Check local quick recovery event
                     local currentPos = myVeh:getPosition()
                     if prevLocalPosInitialized then
                         local dist = currentPos:distance(prevLocalPos)
@@ -1785,7 +1759,6 @@ local function onUpdate(dtReal, dtSim)
                 end
             end
             
-            -- 5b. Decoupled input extrapolation / smoothing
             if remoteVehicleId and hasRemoteState then
                 if M.inputExtrapEnabled then
                     local alpha = 1.0 - math.exp(-15 * dtReal)
@@ -1843,31 +1816,26 @@ local function onUpdate(dtReal, dtSim)
                 end
             end
             
-            -- 5c. Apply remote vehicle state
             applySmoothedRemoteState(dtReal)
             
-            -- 5d. Periodic ping
             pingTimer = pingTimer + dtReal
             if pingTimer >= pingInterval then
                 pingTimer = pingTimer - pingInterval
                 sendPing()
             end
             
-            -- 5e. Per-second metrics window
             metricsTimer = metricsTimer + dtReal
             if metricsTimer >= metricsInterval then
                 metricsTimer = metricsTimer - metricsInterval
                 updateMetricsWindow()
             end
             
-            -- 5f. Adaptive send rate re-evaluation
             adaptiveTimer = adaptiveTimer + dtReal
             if adaptiveTimer >= adaptiveInterval then
                 adaptiveTimer = adaptiveTimer - adaptiveInterval
                 adaptSendRate()
             end
             
-            -- 5g. Draw nickname + speed + active chat in 3D above remote vehicle
             if remoteVehicleId and debugDrawer then
                 local remoteVeh = be:getObjectByID(remoteVehicleId)
                 if remoteVeh and remoteVeh.getPosition then
@@ -1878,7 +1846,6 @@ local function onUpdate(dtReal, dtSim)
                     local speedText = string.format("%.0f km/h", remoteLastSpeed)
                     debugDrawer:drawTextAdvanced(pos, speedText, speedColor, true, true, ColorI(0, 0, 0, 128))
                     
-                    -- Draw 3D Emote/Chat above car if timer is active
                     if M._chatTimer and M._chatTimer > 0 then
                         M._chatTimer = M._chatTimer - dtReal
                         local chatPos = vec3(pos)
@@ -1888,13 +1855,11 @@ local function onUpdate(dtReal, dtSim)
                 end
             end
             
-            -- 5h. Periodic telemetry HUD & Tandem Scorer calculation (10 Hz)
             M._uiTelemetryTimer = (M._uiTelemetryTimer or 0) + dtReal
             if M._uiTelemetryTimer >= 0.1 then
                 M._uiTelemetryTimer = 0
                 local myVeh = be:getPlayerVehicle(0)
                 if myVeh then
-                    -- Trigger Remote Telemetry HUD Update
                     guihooks.trigger("lanMultiplayerRemoteTelemetry", {
                         rpm = remoteTargetRPM,
                         speed = remoteLastSpeed,
@@ -1904,7 +1869,6 @@ local function onUpdate(dtReal, dtSim)
                         brake = lastRemoteInputs.b
                     })
                     
-                    -- Calculate and trigger Tandem Scorer Update
                     if remoteVehicleId and hasRemoteState then
                         local pos = myVeh:getPosition()
                         local dist = pos:distance(remoteTargetPos)
@@ -1932,11 +1896,10 @@ local function onUpdate(dtReal, dtSim)
                         local angleDiff = math.abs(myDriftAngle - remoteDriftAngle)
                         local speedDiff = math.abs(mySpeed - remoteLastSpeed)
                         
-                        -- Scoring algorithm
                         if dist < 15.0 and myDriftAngle > 10.0 and remoteDriftAngle > 10.0 and mySpeed > 10.0 then
                             local proximityMult = math.max(1.0, 15.0 - dist)
                             local angleMult = math.max(0.5, (90.0 - angleDiff) / 90.0)
-                            local pointsEarned = 10 * proximityMult * angleMult * 0.1 -- 10 Hz step
+                            local pointsEarned = 10 * proximityMult * angleMult * 0.1
                             M._tandemScore = (M._tandemScore or 0) + pointsEarned
                         end
                         
@@ -1950,7 +1913,6 @@ local function onUpdate(dtReal, dtSim)
                 end
             end
             
-            -- 5i. Check and sync player vehicle damage (every 1.0 second)
             if M.damageSyncEnabled then
                 damageCheckTimer = damageCheckTimer + dtReal
                 if damageCheckTimer >= 1.0 then
@@ -1985,7 +1947,6 @@ local function onUpdate(dtReal, dtSim)
     end)
     
     if not ok then
-        -- Log once per second to avoid spam
         if not M._lastErrTime or os.clock() - M._lastErrTime > 1.0 then
             M._lastErrTime = os.clock()
             log('E', 'lanMultiplayer', 'onUpdate error: ' .. tostring(err))
@@ -2006,7 +1967,6 @@ local function onVehicleSpawned(id)
             spawnPendingModel = nil
             log('I', 'lanMultiplayer', 'Successfully spawned remote vehicle with ID: ' .. tostring(id))
             
-            -- Inject sync and damage helpers into vehicle Lua VM
             local initScript = [[
             globalSyncVeh = function(t, s, b, c, hb, rpm, gear, ws, lights, flags, soundSync, wheelSync, lightsSync)
                 input.event('throttle', t, 1)
@@ -2102,11 +2062,10 @@ local function setGhostMode(enabled)
     M.ghostModeEnabled = enabled
     log('I', 'lanMultiplayer', 'Ghost mode set to: ' .. tostring(enabled))
     
-    -- Immediately update remote vehicle collision if it exists
     if remoteVehicleId then
         local remoteVeh = be:getObjectByID(remoteVehicleId)
         if remoteVeh then
-            local bit = require("bit")
+            -- FIX: Use module-level cached bit, not require()
             local remoteGhost = false
             if M._lastSyncedFlags then
                 remoteGhost = bit.band(M._lastSyncedFlags, 1) ~= 0
@@ -2295,4 +2254,3 @@ M.setPacketLoss = function(loss) packetLoss = loss end
 M.setJitter = function(jitter) currentJitter = jitter end
 
 return M
-
