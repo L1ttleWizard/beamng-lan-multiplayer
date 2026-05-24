@@ -743,7 +743,8 @@ local function sendRaw(rawData)
         if firstByte == 68 then -- 'D' (DPUB binary telemetry)
             shouldLog = false
         elseif firstByte == 123 then -- '{' (JSON)
-            if rawData:sub(2, 9) == '"t":"u"' or rawData:sub(2, 9) == '"t":"ping' or rawData:sub(2, 9) == '"t":"pong' then
+            local t = rawData:match('"t":"([^"]+)"') or rawData:match('"type":"([^"]+)"')
+            if t == "u" or t == "ping" or t == "pong" then
                 shouldLog = false
             end
         end
@@ -1236,25 +1237,13 @@ local function applySmoothedRemoteState(dtReal)
         smoothedPos.y = currentPos.y + alpha * (remoteTargetPos.y - currentPos.y)
         smoothedPos.z = currentPos.z + alpha * (remoteTargetPos.z - currentPos.z)
         
-        -- In-place modification of pre-allocated quat (NLerp)
-        local dot = currentRot.x*remoteTargetRot.x + currentRot.y*remoteTargetRot.y + currentRot.z*remoteTargetRot.z + currentRot.w*remoteTargetRot.w
-        local s = 1
-        if dot < 0 then s = -1 end
-        local rx = currentRot.x + alpha * (s*remoteTargetRot.x - currentRot.x)
-        local ry = currentRot.y + alpha * (s*remoteTargetRot.y - currentRot.y)
-        local rz = currentRot.z + alpha * (s*remoteTargetRot.z - currentRot.z)
-        local rw = currentRot.w + alpha * (s*remoteTargetRot.w - currentRot.w)
-        local len = math.sqrt(rx*rx + ry*ry + rz*rz + rw*rw)
-        if len > 0.0001 then
-            rx, ry, rz, rw = rx/len, ry/len, rz/len, rw/len
+        remoteVeh:setPosRot(smoothedPos.x, smoothedPos.y, smoothedPos.z, remoteTargetRot.x, remoteTargetRot.y, remoteTargetRot.z, remoteTargetRot.w)
+        
+        M._debugRotTimer = (M._debugRotTimer or 0) + dtReal
+        if M._debugRotTimer >= 1.0 then
+            M._debugRotTimer = 0
+            log('I', 'lanMultiplayer', string.format("ROTATION DEBUG - currentPos: %s, remoteTargetPos: %s, remoteTargetRot: %s", tostring(currentPos), tostring(remoteTargetPos), tostring(remoteTargetRot)))
         end
-        
-        smoothedRot.x = rx
-        smoothedRot.y = ry
-        smoothedRot.z = rz
-        smoothedRot.w = rw
-        
-        remoteVeh:setPosRot(smoothedPos.x, smoothedPos.y, smoothedPos.z, smoothedRot.x, smoothedRot.y, smoothedRot.z, smoothedRot.w)
     end
     
     -- Always set velocity/angularVelocity for physics dead reckoning and visuals
