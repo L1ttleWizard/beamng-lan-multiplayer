@@ -417,12 +417,18 @@
       </div>
       
       <!-- Auto-Discovered LAN Server List -->
-      <div ng-if="lobbies.length > 0" style="margin-top: 8px; margin-bottom: 12px;">
-        <label class="bng-mp-label">Discovered LAN Servers</label>
+      <div style="margin-top: 8px; margin-bottom: 12px;">
+        <label class="bng-mp-label" style="display: flex; justify-content: space-between; align-items: center;">
+          <span>Discovered LAN Servers</span>
+          <span style="font-size: 0.6rem; color: #38bdf8; display: inline-block; animation: bng-mp-pulse 1.5s infinite;">🔍 Scanning...</span>
+        </label>
         <div style="max-height: 100px; overflow-y: auto; background: rgba(15,23,42,0.6); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 4px;">
           <div ng-repeat="lobby in lobbies" ng-click="selectLobby(lobby)" style="padding: 6px 10px; cursor: pointer; border-radius: 4px; font-size: 0.8rem; display: flex; justify-content: space-between; align-items: center; transition: all 0.2s ease; margin-bottom: 2px;" onmouseover="this.style.background='rgba(99,102,241,0.2)'" onmouseout="this.style.background='transparent'">
             <span style="font-weight: 600; color: #818cf8;">🖥️ {{lobby.nickname}}</span>
             <span style="font-size: 0.7rem; color: #94a3b8;">{{lobby.ip}}:{{lobby.port}}</span>
+          </div>
+          <div ng-if="lobbies.length == 0" style="padding: 12px; text-align: center; color: #64748b; font-size: 0.75rem;">
+            No local servers found on port 27019.
           </div>
         </div>
       </div>
