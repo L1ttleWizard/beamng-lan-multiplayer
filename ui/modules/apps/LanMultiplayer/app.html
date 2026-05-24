@@ -611,35 +611,6 @@
     <div ng-if="status == 'CONNECTED'" style="margin-bottom: 14px;">
       <div style="font-size: 0.7rem; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px;">Controls</div>
       <button class="bng-mp-btn" style="margin-top: 0; margin-bottom: 8px;" ng-click="teleportToFriend()">Teleport to Friend</button>
-      
-      <!-- Developer Settings Collapsible Panel -->
-      <button class="bng-mp-btn" style="margin-top: 0; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.08); box-shadow: none; display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; font-size: 0.8rem; text-transform: none; letter-spacing: 0.5px;" ng-click="toggleDevSettings()">
-        <span>⚙️ Developer Settings</span>
-        <span>{{showDevSettings ? '▲' : '▼'}}</span>
-      </button>
-      
-      <div ng-if="showDevSettings" style="margin-top: 8px; background: rgba(15, 23, 42, 0.55); border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 10px; padding: 10px;">
-        <div style="font-size: 0.65rem; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 4px;">Simulation Sync</div>
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 10px;">
-          <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': ghostMode}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleGhostMode()">Ghost: {{ghostMode ? 'ON' : 'OFF'}}</button>
-          <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': soundSync}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleSoundSync()">Sounds: {{soundSync ? 'ON' : 'OFF'}}</button>
-          <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': wheelSync}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleWheelSync()">Wheels: {{wheelSync ? 'ON' : 'OFF'}}</button>
-          <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': lightsSync}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleLightsSync()">Lights: {{lightsSync ? 'ON' : 'OFF'}}</button>
-          <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': damageSync}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleDamageSync()">Damage: {{damageSync ? 'ON' : 'OFF'}}</button>
-          <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': tuningSync}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleTuningSync()">Tuning: {{tuningSync ? 'ON' : 'OFF'}}</button>
-          <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': backfireSync}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleBackfireSync()">Exhaust: {{backfireSync ? 'ON' : 'OFF'}}</button>
-          <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': recoverySync}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleRecoverySync()">Recover: {{recoverySync ? 'ON' : 'OFF'}}</button>
-        </div>
-        
-        <div style="font-size: 0.65rem; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 4px;">Network Technology</div>
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
-          <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': networkOpt}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleNetworkOpt()">Net Opt: {{networkOpt ? 'ON' : 'OFF'}}</button>
-          <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': adaptiveHz}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleAdaptiveHz()">Adapt Hz: {{adaptiveHz ? 'ON' : 'OFF'}}</button>
-          <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': jitterBuff}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleJitterBuff()">JitterBuf: {{jitterBuff ? 'ON' : 'OFF'}}</button>
-          <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': inputExtrap}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleInputExtrap()">InpExtrap: {{inputExtrap ? 'ON' : 'OFF'}}</button>
-          <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': plc}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem; grid-column: 1 / -1;" ng-click="togglePLC()">PLC (DR Extrap): {{plc ? 'ON' : 'OFF'}}</button>
-        </div>
-      </div>
     </div>
 
     <!-- Chat and Emotes Panel -->
@@ -679,5 +650,36 @@
     <button class="bng-mp-btn bng-mp-btn-red" ng-click="disconnect()">
       {{status == 'CONNECTING' ? 'Cancel Connection' : 'Disconnect'}}
     </button>
+  </div>
+
+  <!-- Developer Settings Collapsible Panel (Always visible at the bottom) -->
+  <div style="margin-top: 14px;">
+    <button class="bng-mp-btn" style="margin-top: 0; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.08); box-shadow: none; display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; font-size: 0.8rem; text-transform: none; letter-spacing: 0.5px;" ng-click="toggleDevSettings()">
+      <span>⚙️ Developer Settings</span>
+      <span>{{showDevSettings ? '▲' : '▼'}}</span>
+    </button>
+    
+    <div ng-if="showDevSettings" style="margin-top: 8px; background: rgba(15, 23, 42, 0.55); border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 10px; padding: 10px;">
+      <div style="font-size: 0.65rem; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 4px;">Simulation Sync</div>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 10px;">
+        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': ghostMode}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleGhostMode()">Ghost: {{ghostMode ? 'ON' : 'OFF'}}</button>
+        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': soundSync}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleSoundSync()">Sounds: {{soundSync ? 'ON' : 'OFF'}}</button>
+        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': wheelSync}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleWheelSync()">Wheels: {{wheelSync ? 'ON' : 'OFF'}}</button>
+        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': lightsSync}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleLightsSync()">Lights: {{lightsSync ? 'ON' : 'OFF'}}</button>
+        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': damageSync}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleDamageSync()">Damage: {{damageSync ? 'ON' : 'OFF'}}</button>
+        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': tuningSync}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleTuningSync()">Tuning: {{tuningSync ? 'ON' : 'OFF'}}</button>
+        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': backfireSync}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleBackfireSync()">Exhaust: {{backfireSync ? 'ON' : 'OFF'}}</button>
+        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': recoverySync}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleRecoverySync()">Recover: {{recoverySync ? 'ON' : 'OFF'}}</button>
+      </div>
+      
+      <div style="font-size: 0.65rem; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 4px;">Network Technology</div>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
+        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': networkOpt}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleNetworkOpt()">Net Opt: {{networkOpt ? 'ON' : 'OFF'}}</button>
+        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': adaptiveHz}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleAdaptiveHz()">Adapt Hz: {{adaptiveHz ? 'ON' : 'OFF'}}</button>
+        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': jitterBuff}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleJitterBuff()">JitterBuf: {{jitterBuff ? 'ON' : 'OFF'}}</button>
+        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': inputExtrap}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleInputExtrap()">InpExtrap: {{inputExtrap ? 'ON' : 'OFF'}}</button>
+        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': plc}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem; grid-column: 1 / -1;" ng-click="togglePLC()">PLC (DR Extrap): {{plc ? 'ON' : 'OFF'}}</button>
+      </div>
+    </div>
   </div>
 </div>
