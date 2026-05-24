@@ -14,6 +14,107 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine Next Semantic Version
+        id: semver
+        shell: python
+        run: |
+          import subprocess
+          import re
+          import os
+
+          def get_latest_tag():
+              try:
+                  result = subprocess.run(
+                      ["git", "describe", "--tags", "--abbrev=0", "--match=v*"],
+                      stdout=subprocess.PIPE,
+                      stderr=subprocess.PIPE,
+                      text=True
+                  )
+                  if result.returncode == 0:
+                      return result.stdout.strip()
+              except Exception:
+                  pass
+              return "v1.0.0"
+
+          def get_commits_since(tag):
+              try:
+                  result = subprocess.run(
+                      ["git", "log", f"{tag}..HEAD", "--oneline"],
+                      stdout=subprocess.PIPE,
+                      stderr=subprocess.PIPE,
+                      text=True
+                  )
+                  if result.returncode == 0:
+                      return result.stdout.splitlines()
+              except Exception:
+                  pass
+              # If tag not found or failed, return all commits
+              result = subprocess.run(
+                  ["git", "log", "--oneline"],
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE,
+                  text=True
+              )
+              return result.stdout.splitlines()
+
+          def calculate_next_version(current_version, commits):
+              match_3 = re.match(r"v?(\d+)\.(\d+)\.(\d+)", current_version)
+              if match_3:
+                  major = int(match_3.group(1))
+                  minor = int(match_3.group(2))
+                  patch = int(match_3.group(3))
+              else:
+                  match_2 = re.match(r"v?(\d+)\.(\d+)", current_version)
+                  if match_2:
+                      major = int(match_2.group(1))
+                      minor = int(match_2.group(2))
+                      patch = 0
+                  else:
+                      match_1 = re.match(r"v?(\d+)", current_version)
+                      if match_1:
+                          major = int(match_1.group(1))
+                          minor = 0
+                          patch = 0
+                      else:
+                          major, minor, patch = 1, 0, 0
+              
+              bump = "patch"
+              for commit in commits:
+                  parts = commit.split(" ", 1)
+                  commit_msg = parts[1] if len(parts) > 1 else commit
+                  if "BREAKING CHANGE:" in commit_msg or re.search(r"^[a-zA-Z0-9_\-]+!:", commit_msg):
+                      bump = "major"
+                      break
+                  elif commit_msg.startswith("feat:") or commit_msg.startswith("feat("):
+                      bump = "minor"
+              
+              if bump == "major":
+                  major += 1
+                  minor = 0
+                  patch = 0
+              elif bump == "minor":
+                  minor += 1
+                  patch = 0
+              else:
+                  patch += 1
+              return f"v{major}.{minor}.{patch}"
+
+          latest_tag = get_latest_tag()
+          commits = get_commits_since(latest_tag)
+          
+          if not commits:
+              next_tag = latest_tag
+          else:
+              next_tag = calculate_next_version(latest_tag, commits)
+          
+          print(f"Latest tag: {latest_tag}")
+          print(f"Calculated next tag: {next_tag}")
+          
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"version={next_tag}\n")
 
       - name: Build Mod Zip
         run: |
@@ -22,8 +123,8 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ github.run_number }}
-          name: Release v${{ github.run_number }}
+          tag_name: ${{ steps.semver.outputs.version }}
+          name: Release ${{ steps.semver.outputs.version }}
           draft: false
           prerelease: false
           generate_release_notes: true
