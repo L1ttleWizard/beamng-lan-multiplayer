@@ -13,6 +13,7 @@ def main():
     parser.add_argument("--rate", type=int, default=60, help="Send rate in Hz")
     parser.add_argument("--radius", type=float, default=20.0, help="Trajectory circle radius")
     parser.add_argument("--speed", type=float, default=15.0, help="Simulated speed (m/s)")
+    parser.add_argument("--center", type=str, default=None, help="Manual center position as 'x,y,z'")
     args = parser.parse_args()
 
     client_id = random.randint(1000, 9999)
@@ -21,18 +22,54 @@ def main():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     server_addr = (args.ip, args.port)
 
+    center_x = 0.0
+    center_y = 0.0
+    center_z = 0.0
+
+    if args.center:
+        try:
+            parts = args.center.split(',')
+            center_x = float(parts[0])
+            center_y = float(parts[1])
+            center_z = float(parts[2])
+            print(f"[{nickname}] Using manual trajectory center: ({center_x}, {center_y}, {center_z})")
+        except Exception as e:
+            print(f"[{nickname}] Failed to parse manual center '{args.center}': {e}. Using automatic discovery.")
+
     # 1. Send connection handshake
     handshake = {
         "type": "connect",
         "nickname": nickname,
         "model": "covet",
         "config": {"parts": {}, "vars": {}},
-        "pos": {"x": 0.0, "y": 0.0, "z": 0.0},
+        "pos": {"x": center_x, "y": center_y, "z": center_z},
         "rot": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}
     }
     
     print(f"[{nickname}] Sending handshake to {args.ip}:{args.port}...")
     sock.sendto(json.dumps(handshake).encode('utf-8'), server_addr)
+
+    # If manual center not provided, listen for connect_ack to discover host position
+    if not args.center:
+        print(f"[{nickname}] Waiting for connect_ack from server to center trajectory...")
+        sock.settimeout(2.0)
+        try:
+            data, addr = sock.recvfrom(4096)
+            response = json.loads(data.decode('utf-8'))
+            if response.get("type") == "connect_ack" and "pos" in response:
+                pos = response["pos"]
+                center_x = float(pos.get("x", 0.0))
+                center_y = float(pos.get("y", 0.0))
+                center_z = float(pos.get("z", 0.0))
+                print(f"[{nickname}] Discovered host position: ({center_x}, {center_y}, {center_z})")
+            else:
+                print(f"[{nickname}] Received invalid response or missing position. Spawning at default (0, 0, 0).")
+        except socket.timeout:
+            print(f"[{nickname}] Timed out waiting for connect_ack. Spawning at default (0, 0, 0).")
+        except Exception as e:
+            print(f"[{nickname}] Error receiving connect_ack: {e}. Spawning at default (0, 0, 0).")
+        finally:
+            sock.settimeout(None)
 
     # 2. Main loop: Send binary DPUB packets simulating a circular driving path
     seq = 0
@@ -53,9 +90,9 @@ def main():
             angular_velocity = args.speed / args.radius
             angle = elapsed * angular_velocity
             
-            px = args.radius * math.cos(angle)
-            py = args.radius * math.sin(angle)
-            pz = 0.5 # slightly above ground
+            px = center_x + args.radius * math.cos(angle)
+            py = center_y + args.radius * math.sin(angle)
+            pz = center_z + 0.5 # slightly above center_z
             
             # Face the direction of velocity (tangent to circle)
             yaw = angle + math.pi / 2

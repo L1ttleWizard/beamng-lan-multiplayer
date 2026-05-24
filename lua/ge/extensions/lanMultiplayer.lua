@@ -500,6 +500,18 @@ local function spawnRemoteVehicle(model, config, pos, rot)
         end
     end
     
+    -- If position is zero, spawn near original/host vehicle
+    if originalVeh and (p.x == 0 and p.y == 0 and p.z == 0) then
+        local hostPos = originalVeh:getPosition()
+        local hostRot = quat(originalVeh:getRotation())
+        -- Offset spawn position 5 meters to the right side of the host vehicle
+        local dirRight = hostRot * vec3(1, 0, 0)
+        p = hostPos + dirRight * 5.0
+        p.z = p.z + 0.5
+        r = hostRot
+        log('I', 'lanMultiplayer', string.format("Defaulting remote vehicle spawn near host: %s", tostring(p)))
+    end
+    
     core_vehicles.spawnNewVehicle(model, {
         config = config,
         pos = p,
