@@ -415,6 +415,18 @@
         <label class="bng-mp-label" for="hostIp">Host IP Address</label>
         <input class="bng-mp-input" id="hostIp" type="text" ng-model="config.ip" placeholder="192.168.1.100">
       </div>
+      
+      <!-- Auto-Discovered LAN Server List -->
+      <div ng-if="lobbies.length > 0" style="margin-top: 8px; margin-bottom: 12px;">
+        <label class="bng-mp-label">Discovered LAN Servers</label>
+        <div style="max-height: 100px; overflow-y: auto; background: rgba(15,23,42,0.6); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 4px;">
+          <div ng-repeat="lobby in lobbies" ng-click="selectLobby(lobby)" style="padding: 6px 10px; cursor: pointer; border-radius: 4px; font-size: 0.8rem; display: flex; justify-content: space-between; align-items: center; transition: all 0.2s ease; margin-bottom: 2px;" onmouseover="this.style.background='rgba(99,102,241,0.2)'" onmouseout="this.style.background='transparent'">
+            <span style="font-weight: 600; color: #818cf8;">🖥️ {{lobby.nickname}}</span>
+            <span style="font-size: 0.7rem; color: #94a3b8;">{{lobby.ip}}:{{lobby.port}}</span>
+          </div>
+        </div>
+      </div>
+
       <div class="bng-mp-form-row bng-mp-input-row">
         <div class="bng-mp-input-half">
           <label class="bng-mp-label" for="connPort">Host Port</label>
@@ -534,17 +546,133 @@
       </div>
     </div>
 
+    <!-- Friend Telemetry HUD Card -->
+    <div class="bng-mp-metrics" ng-if="status == 'CONNECTED' && remoteTelemetry.rpm !== undefined" style="margin-top: 10px;">
+      <div class="bng-mp-metrics-title">
+        <span>Friend Telemetry</span>
+        <span class="bng-mp-hz-badge" style="background: rgba(16, 185, 129, 0.15); color: #34d399; border-color: rgba(16, 185, 129, 0.3);">
+          {{remoteTelemetry.gear !== undefined ? (remoteTelemetry.gear == 0 ? 'N' : (remoteTelemetry.gear == -1 ? 'R' : 'D' + remoteTelemetry.gear)) : '-'}}
+        </span>
+      </div>
+      <div class="bng-mp-metrics-grid" style="grid-template-columns: 1fr 1fr;">
+        <div class="bng-mp-metric">
+          <span class="bng-mp-metric-label">RPM</span>
+          <span class="bng-mp-metric-value">{{remoteTelemetry.rpm | number:0}}</span>
+        </div>
+        <div class="bng-mp-metric">
+          <span class="bng-mp-metric-label">Speed</span>
+          <span class="bng-mp-metric-value">{{remoteTelemetry.speed | number:0}}<span class="bng-mp-metric-unit">km/h</span></span>
+        </div>
+        <!-- Throttle & Brake visual bars -->
+        <div style="grid-column: 1 / -1; margin-top: 6px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+            <span class="bng-mp-metric-label" style="font-size: 0.6rem;">Throttle</span>
+            <span style="font-size: 0.65rem; font-weight: 700; color: #34d399;">{{(remoteTelemetry.throttle * 100) | number:0}}%</span>
+          </div>
+          <div style="width: 100%; height: 6px; background: rgba(15,23,42,0.8); border-radius: 3px; overflow: hidden; margin-bottom: 8px;">
+            <div style="height: 100%; background: #34d399; transition: width 0.1s linear;" ng-style="{'width': (remoteTelemetry.throttle * 100) + '%'}"></div>
+          </div>
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+            <span class="bng-mp-metric-label" style="font-size: 0.6rem;">Brake</span>
+            <span style="font-size: 0.65rem; font-weight: 700; color: #f87171;">{{(remoteTelemetry.brake * 100) | number:0}}%</span>
+          </div>
+          <div style="width: 100%; height: 6px; background: rgba(15,23,42,0.8); border-radius: 3px; overflow: hidden;">
+            <div style="height: 100%; background: #f87171; transition: width 0.1s linear;" ng-style="{'width': (remoteTelemetry.brake * 100) + '%'}"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tandem Scorer Card -->
+    <div class="bng-mp-metrics" ng-if="status == 'CONNECTED' && tandem.dist !== undefined" style="margin-top: 10px;">
+      <div class="bng-mp-metrics-title">
+        <span>Tandem Scorer</span>
+        <span class="bng-mp-hz-badge" ng-class="{'ping-good': tandem.dist >= 2 && tandem.dist <= 5, 'ping-ok': tandem.dist > 5 && tandem.dist <= 15, 'ping-bad': tandem.dist < 2 || tandem.dist > 15}" style="border: 1px solid currentColor; background: rgba(0,0,0,0.2);">
+          {{tandem.dist < 2 ? 'COLLISION RISK' : (tandem.dist <= 5 ? 'EXCELLENT' : 'GOOD')}}
+        </span>
+      </div>
+      <div class="bng-mp-metrics-grid" style="grid-template-columns: 1fr 1fr;">
+        <div class="bng-mp-metric">
+          <span class="bng-mp-metric-label">Distance</span>
+          <span class="bng-mp-metric-value">{{tandem.dist | number:1}}<span class="bng-mp-metric-unit">m</span></span>
+        </div>
+        <div class="bng-mp-metric">
+          <span class="bng-mp-metric-label">Drift Score</span>
+          <span class="bng-mp-metric-value" style="color: #fbbf24;">{{tandem.score | number:0}}<span class="bng-mp-metric-unit">pts</span></span>
+        </div>
+        <div class="bng-mp-metric" style="grid-column: 1 / -1; margin-top: 4px; display: flex; flex-direction: row; justify-content: space-between; font-size: 0.75rem;">
+          <span style="color: #94a3b8;">Angle Diff: <span style="font-weight: 700; color: #e2e8f0;">{{tandem.angleDiff | number:0}}°</span></span>
+          <span style="color: #94a3b8;">Speed Diff: <span style="font-weight: 700; color: #e2e8f0;">{{tandem.speedDiff | number:1}} km/h</span></span>
+        </div>
+      </div>
+    </div>
+
     <!-- Multiplayer Controls -->
     <div ng-if="status == 'CONNECTED'" style="margin-bottom: 14px;">
       <div style="font-size: 0.7rem; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px;">Controls</div>
       <button class="bng-mp-btn" style="margin-top: 0; margin-bottom: 8px;" ng-click="teleportToFriend()">Teleport to Friend</button>
-      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
-        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': ghostMode}" style="margin-top: 0;" ng-click="toggleGhostMode()">Ghost: {{ghostMode ? 'ON' : 'OFF'}}</button>
-        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': networkOpt}" style="margin-top: 0;" ng-click="toggleNetworkOpt()">Net Opt: {{networkOpt ? 'ON' : 'OFF'}}</button>
-        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': soundSync}" style="margin-top: 0;" ng-click="toggleSoundSync()">Sounds: {{soundSync ? 'ON' : 'OFF'}}</button>
-        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': wheelSync}" style="margin-top: 0;" ng-click="toggleWheelSync()">Wheels: {{wheelSync ? 'ON' : 'OFF'}}</button>
-        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': lightsSync}" style="margin-top: 0;" ng-click="toggleLightsSync()">Lights: {{lightsSync ? 'ON' : 'OFF'}}</button>
-        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': damageSync}" style="margin-top: 0;" ng-click="toggleDamageSync()">Damage: {{damageSync ? 'ON' : 'OFF'}}</button>
+      
+      <!-- Developer Settings Collapsible Panel -->
+      <button class="bng-mp-btn" style="margin-top: 0; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.08); box-shadow: none; display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; font-size: 0.8rem; text-transform: none; letter-spacing: 0.5px;" ng-click="toggleDevSettings()">
+        <span>⚙️ Developer Settings</span>
+        <span>{{showDevSettings ? '▲' : '▼'}}</span>
+      </button>
+      
+      <div ng-if="showDevSettings" style="margin-top: 8px; background: rgba(15, 23, 42, 0.55); border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 10px; padding: 10px;">
+        <div style="font-size: 0.65rem; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 4px;">Simulation Sync</div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 10px;">
+          <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': ghostMode}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleGhostMode()">Ghost: {{ghostMode ? 'ON' : 'OFF'}}</button>
+          <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': soundSync}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleSoundSync()">Sounds: {{soundSync ? 'ON' : 'OFF'}}</button>
+          <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': wheelSync}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleWheelSync()">Wheels: {{wheelSync ? 'ON' : 'OFF'}}</button>
+          <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': lightsSync}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleLightsSync()">Lights: {{lightsSync ? 'ON' : 'OFF'}}</button>
+          <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': damageSync}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleDamageSync()">Damage: {{damageSync ? 'ON' : 'OFF'}}</button>
+          <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': tuningSync}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleTuningSync()">Tuning: {{tuningSync ? 'ON' : 'OFF'}}</button>
+          <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': backfireSync}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleBackfireSync()">Exhaust: {{backfireSync ? 'ON' : 'OFF'}}</button>
+          <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': recoverySync}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleRecoverySync()">Recover: {{recoverySync ? 'ON' : 'OFF'}}</button>
+        </div>
+        
+        <div style="font-size: 0.65rem; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 4px;">Network Technology</div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
+          <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': networkOpt}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleNetworkOpt()">Net Opt: {{networkOpt ? 'ON' : 'OFF'}}</button>
+          <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': adaptiveHz}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleAdaptiveHz()">Adapt Hz: {{adaptiveHz ? 'ON' : 'OFF'}}</button>
+          <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': jitterBuff}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleJitterBuff()">JitterBuf: {{jitterBuff ? 'ON' : 'OFF'}}</button>
+          <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': inputExtrap}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleInputExtrap()">InpExtrap: {{inputExtrap ? 'ON' : 'OFF'}}</button>
+          <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': plc}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem; grid-column: 1 / -1;" ng-click="togglePLC()">PLC (DR Extrap): {{plc ? 'ON' : 'OFF'}}</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Chat and Emotes Panel -->
+    <div ng-if="status == 'CONNECTED'" style="margin-bottom: 14px; background: rgba(15, 23, 42, 0.4); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 10px; padding: 10px;">
+      <div style="font-size: 0.7rem; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center;">
+        <span>Chat & Emotes</span>
+        <span style="font-size: 0.6rem; color: #475569; cursor: pointer; text-transform: none;" ng-click="toggleChatLog()">
+          {{showChatLog ? 'Hide Log' : 'Show Log'}}
+        </span>
+      </div>
+      
+      <!-- Collapsible Chat Log -->
+      <div ng-show="showChatLog" style="height: 90px; overflow-y: auto; font-size: 0.75rem; background: rgba(15,23,42,0.6); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 6px; margin-bottom: 8px;">
+        <div ng-repeat="chat in chatLog track by $index" style="margin-bottom: 4px; line-height: 1.3;">
+          <span style="font-weight: 700; color: #818cf8;">{{chat.sender}}:</span> <span style="color: #e2e8f0;">{{chat.text}}</span>
+        </div>
+        <div ng-if="chatLog.length == 0" style="color: #475569; text-align: center; margin-top: 25px; font-size: 0.7rem;">
+          No messages yet. Send an emote below!
+        </div>
+      </div>
+
+      <!-- Quick Click Emote Pills -->
+      <div style="display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px;">
+        <button ng-click="sendEmote('Nice Drift! 🏎️💨')" style="background: rgba(99, 102, 241, 0.15); border: 1px solid rgba(99, 102, 241, 0.3); border-radius: 12px; color: #818cf8; font-size: 0.65rem; font-weight: 600; padding: 2px 8px; cursor: pointer; transition: all 0.2s;" onmouseover="this.style.background='rgba(99, 102, 241, 0.3)'" onmouseout="this.style.background='rgba(99, 102, 241, 0.15)'">Nice Drift!</button>
+        <button ng-click="sendEmote('Oops! 💥')" style="background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 12px; color: #f87171; font-size: 0.65rem; font-weight: 600; padding: 2px 8px; cursor: pointer; transition: all 0.2s;" onmouseover="this.style.background='rgba(239, 68, 68, 0.3)'" onmouseout="this.style.background='rgba(239, 68, 68, 0.15)'">Oops!</button>
+        <button ng-click="sendEmote('Close! 🎯')" style="background: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 12px; color: #34d399; font-size: 0.65rem; font-weight: 600; padding: 2px 8px; cursor: pointer; transition: all 0.2s;" onmouseover="this.style.background='rgba(16, 185, 129, 0.3)'" onmouseout="this.style.background='rgba(16, 185, 129, 0.15)'">Close!</button>
+        <button ng-click="sendEmote('Go Go Go! 🟢')" style="background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.3); border-radius: 12px; color: #fbbf24; font-size: 0.65rem; font-weight: 600; padding: 2px 8px; cursor: pointer; transition: all 0.2s;" onmouseover="this.style.background='rgba(245, 158, 11, 0.3)'" onmouseout="this.style.background='rgba(245, 158, 11, 0.15)'">Go!</button>
+      </div>
+
+      <!-- Text Input Bar -->
+      <div style="display: flex; gap: 6px;">
+        <input class="bng-mp-input" type="text" ng-model="chatInput" placeholder="Send message..." style="padding: 6px 10px; font-size: 0.75rem; flex: 1; border-color: rgba(255, 255, 255, 0.08);" ng-keypress="($event.which === 13) && sendChatMessage()">
+        <button class="bng-mp-btn" style="margin-top: 0; width: auto; padding: 6px 12px; font-size: 0.75rem; box-shadow: none;" ng-click="sendChatMessage()">Send</button>
       </div>
     </div>
 

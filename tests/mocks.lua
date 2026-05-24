@@ -13,8 +13,9 @@ end
 
 -- 1. Logging Mock
 function log(level, area, msg)
-    -- Silent in test runs to keep output clean, unless needed
-    -- print(string.format("[%s][%s] %s", level, area, msg))
+    if level == "E" then
+        print(string.format("\27[31m[%s][%s] %s\27[0m", level, area, msg))
+    end
 end
 
 -- 2. GUI Hooks Mock

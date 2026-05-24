@@ -17,6 +17,31 @@ angular.module('beamng.apps')
       scope.lightsSync = true;
       scope.damageSync = true;
 
+      // New Toggles
+      scope.tuningSync = true;
+      scope.backfireSync = true;
+      scope.recoverySync = true;
+      scope.adaptiveHz = true;
+      scope.jitterBuff = true;
+      scope.inputExtrap = true;
+      scope.plc = true;
+
+      // Collapsible & Chat UI states
+      scope.showDevSettings = false;
+      scope.showChatLog = true;
+      scope.chatInput = "";
+      scope.chatLog = [];
+      scope.lobbies = [];
+
+      // Remote telemetry & tandem indicators
+      scope.remoteTelemetry = {};
+      scope.tandem = {
+        dist: undefined,
+        speedDiff: 0,
+        angleDiff: 0,
+        score: 0
+      };
+
       scope.config = {
         ip: "127.0.0.1",
         port: 27015,
@@ -125,6 +150,78 @@ angular.module('beamng.apps')
         bngApi.engineLua('extensions.lanMultiplayer.setDamageSync(' + scope.damageSync + ')');
       };
 
+      // Toggle Tuning Sync
+      scope.toggleTuningSync = function() {
+        scope.tuningSync = !scope.tuningSync;
+        bngApi.engineLua('extensions.lanMultiplayer.setTuningSync(' + scope.tuningSync + ')');
+      };
+
+      // Toggle Backfire Sync
+      scope.toggleBackfireSync = function() {
+        scope.backfireSync = !scope.backfireSync;
+        bngApi.engineLua('extensions.lanMultiplayer.setBackfireSync(' + scope.backfireSync + ')');
+      };
+
+      // Toggle Recovery Sync
+      scope.toggleRecoverySync = function() {
+        scope.recoverySync = !scope.recoverySync;
+        bngApi.engineLua('extensions.lanMultiplayer.setRecoverySync(' + scope.recoverySync + ')');
+      };
+
+      // Toggle Adaptive Hz
+      scope.toggleAdaptiveHz = function() {
+        scope.adaptiveHz = !scope.adaptiveHz;
+        bngApi.engineLua('extensions.lanMultiplayer.setAdaptiveHz(' + scope.adaptiveHz + ')');
+      };
+
+      // Toggle Jitter Buffer
+      scope.toggleJitterBuff = function() {
+        scope.jitterBuff = !scope.jitterBuff;
+        bngApi.engineLua('extensions.lanMultiplayer.setJitterBuffer(' + scope.jitterBuff + ')');
+      };
+
+      // Toggle Input Extrap
+      scope.toggleInputExtrap = function() {
+        scope.inputExtrap = !scope.inputExtrap;
+        bngApi.engineLua('extensions.lanMultiplayer.setInputExtrap(' + scope.inputExtrap + ')');
+      };
+
+      // Toggle PLC
+      scope.togglePLC = function() {
+        scope.plc = !scope.plc;
+        bngApi.engineLua('extensions.lanMultiplayer.setPLC(' + scope.plc + ')');
+      };
+
+      // Toggle Developer Settings
+      scope.toggleDevSettings = function() {
+        scope.showDevSettings = !scope.showDevSettings;
+      };
+
+      // Toggle Chat Log
+      scope.toggleChatLog = function() {
+        scope.showChatLog = !scope.showChatLog;
+      };
+
+      // Select discovered LAN server
+      scope.selectLobby = function(lobby) {
+        scope.config.ip = lobby.ip;
+        scope.config.port = lobby.port;
+      };
+
+      // Send emote pill
+      scope.sendEmote = function(text) {
+        var cleanText = text.replace(/["\\\r\n]/g, "");
+        bngApi.engineLua('extensions.lanMultiplayer.chatMessage("' + cleanText + '")');
+      };
+
+      // Send manual text chat message
+      scope.sendChatMessage = function() {
+        if (!scope.chatInput || scope.chatInput.trim() === "") return;
+        var cleanMsg = scope.chatInput.replace(/["\\\r\n]/g, "");
+        bngApi.engineLua('extensions.lanMultiplayer.chatMessage("' + cleanMsg + '")');
+        scope.chatInput = "";
+      };
+
       // Teleport to Friend
       scope.teleportToFriend = function() {
         bngApi.engineLua('extensions.lanMultiplayer.teleportToFriend()');
@@ -165,6 +262,27 @@ angular.module('beamng.apps')
           if (data.damageSync !== undefined) {
             scope.damageSync = data.damageSync;
           }
+          if (data.tuningSync !== undefined) {
+            scope.tuningSync = data.tuningSync;
+          }
+          if (data.backfireSync !== undefined) {
+            scope.backfireSync = data.backfireSync;
+          }
+          if (data.recoverySync !== undefined) {
+            scope.recoverySync = data.recoverySync;
+          }
+          if (data.adaptiveHz !== undefined) {
+            scope.adaptiveHz = data.adaptiveHz;
+          }
+          if (data.jitterBuff !== undefined) {
+            scope.jitterBuff = data.jitterBuff;
+          }
+          if (data.inputExtrap !== undefined) {
+            scope.inputExtrap = data.inputExtrap;
+          }
+          if (data.plc !== undefined) {
+            scope.plc = data.plc;
+          }
 
           scope.error = data.error || "";
 
@@ -198,6 +316,44 @@ angular.module('beamng.apps')
           scope.metrics.pingHistory = data.pingHistory || [];
           scope.metrics.pingMax = data.pingMax || 1;
           scope.metrics.sparklinePath = buildSparkline(data.pingHistory, data.pingMax);
+        });
+      });
+
+      // Handle lobbies auto-discovery
+      scope.$on('lanMultiplayerLobby', function (event, lobbies) {
+        scope.$evalAsync(function () {
+          scope.lobbies = lobbies || [];
+        });
+      });
+
+      // Handle remote vehicle telemetry
+      scope.$on('lanMultiplayerRemoteTelemetry', function (event, telemetry) {
+        scope.$evalAsync(function () {
+          scope.remoteTelemetry = telemetry || {};
+        });
+      });
+
+      // Handle tandem drift scorer updates
+      scope.$on('lanMultiplayerTandemUpdate', function (event, data) {
+        scope.$evalAsync(function () {
+          scope.tandem.dist = data.dist;
+          scope.tandem.speedDiff = data.speedDiff || 0;
+          scope.tandem.angleDiff = data.angleDiff || 0;
+          scope.tandem.score = data.score || 0;
+        });
+      });
+
+      // Handle chat messages
+      scope.$on('lanMultiplayerChat', function (event, chat) {
+        scope.$evalAsync(function () {
+          scope.chatLog.push({
+            sender: chat.sender || "System",
+            text: chat.text || ""
+          });
+          // Keep chat log capped at 50 messages to prevent memory leak
+          if (scope.chatLog.length > 50) {
+            scope.chatLog.shift();
+          }
         });
       });
 

@@ -201,6 +201,7 @@ tests.testFFIBinarySerialization = function()
     myVeh.angularVelocity = vec3(0.05, -0.02, 0.1)
     
     be.playerVehicle = myVeh
+    M.inputExtrapEnabled = false
     
     -- Mock cached electrics for vehicle 1
     core_vehicleBridge.cachedData[1] = {
@@ -276,6 +277,9 @@ tests.testFFIBinarySerialization = function()
     assertNear(-0.02, targetAngVel.y)
     assertNear(0.1, targetAngVel.z)
     
+    -- Trigger onUpdate to apply decoupled states and queue VM commands
+    M.onUpdate(0.016, 0.016)
+    
     -- Validate control inputs applied to remote vehicle Lua VM via globalSyncVeh helper
     assertEqual(1, #remoteVeh.queuedCommands)
     local cmd = remoteVeh.queuedCommands[1]
@@ -320,6 +324,7 @@ tests.testOnUpdateDrawing = function()
     local remoteVeh = createMockVehicle(mockRemoteVehId, "pickup", nil)
     remoteVeh.position = vec3(10, 20, 30)
     M.setRemoteVehicleId(mockRemoteVehId)
+    M.plcEnabled = false
     
     -- Set target state
     M.updateRemoteVehicle({
@@ -381,6 +386,7 @@ tests.testFeatureToggles = function()
     
     remoteVeh.queuedCommands = {}
     M.updateRemoteVehicleBinary(packet)
+    M.onUpdate(0.016, 0.016)
     
     assertEqual(1, #remoteVeh.queuedCommands)
     local cmd = remoteVeh.queuedCommands[1]
@@ -392,10 +398,11 @@ tests.testFeatureToggles = function()
     M.wheelSyncEnabled = false
     M.lightsSyncEnabled = false
     
-    -- Force update execution by setting syncCounter to 15 (heartbeat override)
-    M._syncCounter = 15
+    -- Force update execution by setting updateCounter to 15 (heartbeat override)
+    M._updateCounter = 15
     remoteVeh.queuedCommands = {}
     M.updateRemoteVehicleBinary(packet)
+    M.onUpdate(0.016, 0.016)
     
     assertEqual(1, #remoteVeh.queuedCommands)
     local cmd2 = remoteVeh.queuedCommands[1]
@@ -459,6 +466,266 @@ tests.testDeadReckoning = function()
     
     -- Restore clock
     os.clock = originalClock
+end
+
+-- 13. Adaptive Hz Toggle Test
+tests.testAdaptiveHzToggle = function()
+    M.resetMetrics()
+    M.adaptiveHzEnabled = false
+    
+    -- Network stressed (would normally trigger rate change)
+    M.setPacketLoss(10.0)
+    M.setJitter(100.0)
+    M.adaptSendRate()
+    
+    assertEqual(0.0166, M.getSendRate(), "sendRate should be locked to minSendRate when adaptiveHzEnabled is false")
+    
+    -- Network healthy (would normally trigger rate change)
+    M.setPacketLoss(0.0)
+    M.setJitter(0.0)
+    M.adaptSendRate()
+    
+    assertEqual(0.0166, M.getSendRate(), "sendRate should remain minSendRate when adaptiveHzEnabled is false")
+end
+
+-- 14. Jitter Buffer Toggle Test
+tests.testJitterBufferToggle = function()
+    M.connect("127.0.0.1", 27015, 0)
+    M.setState("CONNECTED")
+    
+    local mockRemoteVehId = 9999
+    local remoteVeh = createMockVehicle(mockRemoteVehId, "covet", { parts = {} })
+    remoteVeh.position = vec3(0, 0, 0)
+    M.setRemoteVehicleId(mockRemoteVehId)
+    
+    -- Setup remote target pos and hasRemoteState = true
+    M.updateRemoteVehicle({
+        t = "u",
+        p = { 10, 0, 0 },
+        r = { 0, 0, 0, 1 },
+        v = { 0, 0, 0 },
+        a = { 0, 0, 0 },
+        i = { 0, 0, 0, 0, 0 }
+    })
+    
+    -- High jitter and packet loss
+    M.setJitter(50.0)
+    M.setPacketLoss(10.0)
+    M.setState("CONNECTED")
+    
+    -- 1. Test with jitter buffer enabled (slower interpolation)
+    M.jitterBufferEnabled = true
+    remoteVeh.position = vec3(0, 0, 0)
+    M.applySmoothedRemoteState(0.016)
+    local posXWithBuffer = remoteVeh.position.x
+    
+    -- 2. Test with jitter buffer disabled (faster interpolation)
+    M.jitterBufferEnabled = false
+    remoteVeh.position = vec3(0, 0, 0)
+    M.applySmoothedRemoteState(0.016)
+    local posXWithoutBuffer = remoteVeh.position.x
+    
+    assertTrue(posXWithoutBuffer > posXWithBuffer, "Should converge faster (move further) when jitter buffer is disabled under network strain")
+end
+
+-- 15. PLC (DR) Toggle Test
+tests.testPLCToggle = function()
+    M.resetMetrics()
+    M.connect("127.0.0.1", 27015, 0)
+    M.setState("CONNECTED")
+    
+    -- Setup remote vehicle
+    local mockRemoteVehId = 8888
+    local remoteVeh = createMockVehicle(mockRemoteVehId, "covet", { parts = {} })
+    M.setRemoteVehicleId(mockRemoteVehId)
+    
+    -- Set initial target state with velocity
+    M.updateRemoteVehicle({
+        t = "u",
+        p = { 10, 0, 0 },
+        r = { 0, 0, 0, 1 },
+        v = { 5.0, 0, 0 },
+        a = { 0, 0, 0 },
+        i = { 0, 0, 0, 0, 0 }
+    })
+    
+    -- 1. Test with PLC enabled (should extrapolate target position)
+    M.plcEnabled = true
+    M.applySmoothedRemoteState(0.1)
+    assertEqual(10.5, M.getRemoteTargetPos().x, "Target pos should extrapolate by velocity * dt when PLC is enabled")
+    
+    -- Reset target pos
+    M.getRemoteTargetPos().x = 10
+    
+    -- 2. Test with PLC disabled (should NOT extrapolate)
+    M.plcEnabled = false
+    M.applySmoothedRemoteState(0.1)
+    assertEqual(10.0, M.getRemoteTargetPos().x, "Target pos should remain frozen when PLC is disabled")
+end
+
+-- 16. Tandem Scorer Test
+tests.testTandemScorer = function()
+    M.resetMetrics()
+    M.connect("127.0.0.1", 27015, 0)
+    M.setState("CONNECTED")
+    
+    -- Mock remote vehicle position/rotation/velocity
+    local mockRemoteVehId = 1111
+    local remoteVeh = createMockVehicle(mockRemoteVehId, "covet", { parts = {} })
+    M.setRemoteVehicleId(mockRemoteVehId)
+    
+    -- Disable PLC extrapolation for scorer test so distance doesn't drift
+    M.plcEnabled = false
+    
+    -- Update remote vehicle to drift at 15 degrees:
+    -- Z rotation quaternion for -75 degrees to rotate (0,1,0) into (cos 15, sin 15, 0)
+    M.updateRemoteVehicle({
+        t = "u",
+        p = { 5.0, 0.0, 0.0 },
+        r = { 0, 0, 0.6087614, 0.7933533 },
+        v = { 10.0, 0, 0 },
+        a = { 0, 0, 0 },
+        i = { 0, 0, 0, 0, 0 }
+    })
+    
+    -- Mock player vehicle
+    local myVeh = createMockVehicle(2, "covet", { parts = {} })
+    myVeh.position = vec3(0, 0, 0)
+    myVeh.velocity = vec3(10.0, 0, 0)
+    be.playerVehicle = myVeh
+    
+    -- Trigger onUpdate to calculate tandem metrics. Both vehicles drift at 15 degrees.
+    myVeh.getDirectionVector = function() return vec3(0.9659258, 0.258819, 0) end
+    
+    -- Trigger 10Hz tick in onUpdate (we set uiTelemetryTimer to 0.1 to force the tick)
+    M._uiTelemetryTimer = 0.1
+    M.onUpdate(0.1, 0.1)
+    
+    local tandemData = guihooks.triggered["lanMultiplayerTandemUpdate"]
+    assertNotNil(tandemData)
+    assertEqual(5.0, tandemData.dist)
+    assertNear(0.0, tandemData.speedDiff, 0.01)
+    assertNear(0.0, tandemData.angleDiff, 0.01)
+    assertTrue(tandemData.score > 0, "Tandem score should accumulate when drifting in close proximity")
+end
+
+-- 17. Recovery Sync Test
+tests.testRecoverySync = function()
+    M.resetMetrics()
+    M.connect("127.0.0.1", 27015, 0)
+    M.setState("CONNECTED")
+    
+    local sock = package.loaded["socket"].getLastSocket()
+    sock:clearSent()
+    
+    local myVeh = createMockVehicle(2, "covet", { parts = {} })
+    myVeh.position = vec3(0, 0, 0)
+    be.playerVehicle = myVeh
+    
+    -- Initialize prevLocalPos
+    M.onUpdate(0.02, 0.02)
+    sock:clearSent()
+    
+    -- 1. Test sender-side recovery detection
+    M.recoverySyncEnabled = true
+    myVeh.position = vec3(15.0, 0, 0) -- massive snap (> 10m)
+    myVeh.velocity = vec3(0, 0, 0)
+    
+    -- Force sendUpdate by setting sendTimer
+    M.onUpdate(0.02, 0.02)
+    
+    local sentRecovery = false
+    for _, packet in ipairs(sock._sent) do
+        if #packet.data ~= 92 then
+            local msg = jsonDecode(packet.data)
+            if msg and msg.type == "recovery" then
+                sentRecovery = true
+                assertEqual(15.0, msg.pos.x)
+            end
+        end
+    end
+    assertTrue(sentRecovery, "Recovery packet should be transmitted upon local positional snap")
+    
+    -- 2. Test receiver-side recovery application
+    local mockRemoteVehId = 7777
+    local remoteVeh = createMockVehicle(mockRemoteVehId, "covet", { parts = {} })
+    M.setRemoteVehicleId(mockRemoteVehId)
+    
+    remoteVeh.position = vec3(0, 0, 0)
+    M.processPacket(jsonEncode({
+        type = "recovery",
+        pos = { x = 25.0, y = 0.0, z = 0.0 },
+        rot = { x = 0, y = 0, z = 0, w = 1 }
+    }), "127.0.0.1", 27015)
+    
+    assertEqual(25.0, remoteVeh.position.x, "Remote vehicle should instantly snap to recovery coordinates")
+end
+
+-- 18. Exhaust Backfire Sync Test
+tests.testExhaustBackfireSync = function()
+    M.resetMetrics()
+    M.connect("127.0.0.1", 27015, 0)
+    M.setState("CONNECTED")
+    
+    local sock = package.loaded["socket"].getLastSocket()
+    sock:clearSent()
+    
+    local myVeh = createMockVehicle(2, "covet", { parts = {} })
+    be.playerVehicle = myVeh
+    
+    -- Mock cached backfire value
+    core_vehicleBridge.cachedData[2] = { backfire = 1 }
+    
+    M.backfireSyncEnabled = true
+    M.onUpdate(0.02, 0.02)
+    
+    local sentBackfire = false
+    for _, packet in ipairs(sock._sent) do
+        if #packet.data ~= 92 then
+            local msg = jsonDecode(packet.data)
+            if msg and msg.type == "backfire" then
+                sentBackfire = true
+            end
+        end
+    end
+    assertTrue(sentBackfire, "Backfire sync packet should be sent when local vehicle registers backfire")
+    
+    -- 2. Test receiver-side backfire trigger
+    local mockRemoteVehId = 7777
+    local remoteVeh = createMockVehicle(mockRemoteVehId, "covet", { parts = {} })
+    M.setRemoteVehicleId(mockRemoteVehId)
+    
+    remoteVeh.queuedCommands = {}
+    M.processPacket(jsonEncode({ type = "backfire" }), "127.0.0.1", 27015)
+    
+    assertEqual(1, #remoteVeh.queuedCommands)
+    assertTrue(remoteVeh.queuedCommands[1]:find("exhaust.backfire") ~= nil, "Should trigger backfire in remote vehicle VM")
+end
+
+-- 19. Part Config Change Sync Test
+tests.testPartConfigChangeSync = function()
+    M.resetMetrics()
+    M.connect("127.0.0.1", 27015, 0)
+    M.setState("CONNECTED")
+    
+    local sock = package.loaded["socket"].getLastSocket()
+    sock:clearSent()
+    
+    local myVeh = createMockVehicle(2, "covet", { parts = { engine = "stage1" } })
+    be.playerVehicle = myVeh
+    
+    M.tuningSyncEnabled = true
+    M.onPartConfigChanged(2)
+    
+    local sentSpawn = false
+    for _, packet in ipairs(sock._sent) do
+        local msg = jsonDecode(packet.data)
+        if msg and msg.type == "spawn" then
+            sentSpawn = true
+            assertEqual("stage1", msg.config.parts.engine)
+        end
+    end
+    assertTrue(sentSpawn, "Spawn packet should be sent on part configuration change")
 end
 
 -- ============================================================================
