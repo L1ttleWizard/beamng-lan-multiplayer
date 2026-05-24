@@ -737,8 +737,18 @@ local function sendRaw(rawData)
         txPackets = txPackets + 1
         txBytes = txBytes + #rawData
         
-        -- Debug logging for non-hot-path packets (ignore positions 'u' and pings/pongs)
-        if rawData:sub(2, 9) ~= '"t":"u"' and rawData:sub(2, 9) ~= '"t":"ping' and rawData:sub(2, 9) ~= '"t":"pong' then
+        -- Allocation-free check to ignore telemetry hot-path and ping/pong from logging
+        local firstByte = string.byte(rawData, 1)
+        local shouldLog = true
+        if firstByte == 68 then -- 'D' (DPUB binary telemetry)
+            shouldLog = false
+        elseif firstByte == 123 then -- '{' (JSON)
+            if rawData:sub(2, 9) == '"t":"u"' or rawData:sub(2, 9) == '"t":"ping' or rawData:sub(2, 9) == '"t":"pong' then
+                shouldLog = false
+            end
+        end
+        
+        if shouldLog then
             log('I', 'lanMultiplayer', 'Sent packet: ' .. rawData:sub(1, 120) .. '... (size: ' .. tostring(#rawData) .. ' bytes)')
         end
     else
@@ -760,7 +770,7 @@ local function sendUpdate()
     local pos = myVeh.getPosition and myVeh:getPosition()
     local rawRot = myVeh.getRotation and myVeh:getRotation()
     if not pos or not rawRot then return end
-    local rot = rawRot -- Use direct FFI cdata reference without constructor allocation
+    local rot = quat(rawRot)
     
     local vx, vy, vz = 0, 0, 0
     local vel = myVeh.getVelocity and myVeh:getVelocity()
@@ -1196,8 +1206,9 @@ local function applySmoothedRemoteState(dtReal)
     end
     
     local currentPos = remoteVeh.getPosition and remoteVeh:getPosition()
-    local currentRot = remoteVeh.getRotation and remoteVeh:getRotation()
-    if not currentPos or not currentRot then return end
+    local rawRot = remoteVeh.getRotation and remoteVeh:getRotation()
+    if not currentPos or not rawRot then return end
+    local currentRot = quat(rawRot)
     
     -- Calculate distance to target
     local dx = remoteTargetPos.x - currentPos.x
@@ -1270,11 +1281,20 @@ local function processPacket(rawMsg, ip, port)
         return
     end
     
-    -- Debug logging for incoming JSON packets (ignore pings/pongs)
+    -- Debug logging for incoming JSON packets (ignore position updates and pings/pongs)
     local j1, j2, j3, j4, j5, j6, j7, j8, j9 = string.byte(rawMsg, 2, 10)
-    local isPingPongLogIgnore = (j1 == 34 and j2 == 116 and j3 == 34 and j4 == 58 and j5 == 34 and j6 == 112 and j7 == 105 and j8 == 110 and j9 == 103) or -- '"t":"ping'
-                                (j1 == 34 and j2 == 116 and j3 == 34 and j4 == 58 and j5 == 34 and j6 == 112 and j7 == 111 and j8 == 110 and j9 == 103)    -- '"t":"pong'
-    if not isPingPongLogIgnore then
+    local isUpdateOrPingPong = false
+    if j1 == 34 and j2 == 116 and j3 == 34 and j4 == 58 and j5 == 34 then -- starts with '"t":"'
+        if j6 == 117 and j7 == 34 then -- 'u"'
+            isUpdateOrPingPong = true
+        elseif j6 == 112 and j7 == 105 and j8 == 110 and j9 == 103 then -- 'ping'
+            isUpdateOrPingPong = true
+        elseif j6 == 112 and j7 == 111 and j8 == 110 and j9 == 103 then -- 'pong'
+            isUpdateOrPingPong = true
+        end
+    end
+    
+    if not isUpdateOrPingPong then
         log('I', 'lanMultiplayer', 'Received packet from ' .. tostring(ip) .. ':' .. tostring(port) .. ' : ' .. rawMsg:sub(1, 120) .. '... (size: ' .. tostring(#rawMsg) .. ' bytes)')
     end
     
@@ -2205,7 +2225,7 @@ local function teleportToFriend()
     local myVeh = be:getPlayerVehicle(0)
     if remoteVeh and myVeh then
         local remotePos = remoteVeh:getPosition()
-        local remoteRot = remoteVeh:getRotation()
+        local remoteRot = quat(remoteVeh:getRotation())
         myVeh:setPosRot(remotePos.x, remotePos.y, remotePos.z + 2.0, remoteRot.x, remoteRot.y, remoteRot.z, remoteRot.w)
         log('I', 'lanMultiplayer', 'Teleported to friend.')
     end
