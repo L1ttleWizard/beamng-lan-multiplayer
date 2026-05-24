@@ -536,6 +536,8 @@ end
 
 -- Reset network metrics
 local function resetMetrics()
+    M._jitterQueue = {}
+    M._ipcTimer = 0.02
     currentPing = 0
     currentJitter = 0
     pingSeq = 0
@@ -1565,14 +1567,11 @@ local function receivePackets()
     end
     
     -- 2. Process ready delayed packets from jitter queue
-    local i = 1
-    while i <= #M._jitterQueue do
+    for i = #M._jitterQueue, 1, -1 do
         local pkt = M._jitterQueue[i]
         if now >= pkt.executeAt then
             table.insert(packetsToProcess, pkt)
             table.remove(M._jitterQueue, i)
-        else
-            i = i + 1
         end
     end
     
@@ -1889,43 +1888,50 @@ local function onUpdate(dtReal, dtSim)
                     lastRemoteInputs.hb = remoteTargetInputs.hb
                 end
                 
-                local inputsChanged = math.abs(lastRemoteInputs.t - M._lastSyncedInputs.t) > 0.001 or
-                                      math.abs(lastRemoteInputs.s - M._lastSyncedInputs.s) > 0.001 or
-                                      math.abs(lastRemoteInputs.b - M._lastSyncedInputs.b) > 0.001 or
-                                      math.abs(lastRemoteInputs.c - M._lastSyncedInputs.c) > 0.001 or
-                                      math.abs(lastRemoteInputs.hb - M._lastSyncedInputs.hb) > 0.001
-                
-                local stateChanged = math.abs(remoteTargetRPM - M._lastSyncedRPM) > 10 or
-                                     math.abs(remoteTargetWS - M._lastSyncedWS) > 0.1 or
-                                     remoteTargetGear ~= M._lastSyncedGear or
-                                     remoteTargetLights ~= M._lastSyncedLights or
-                                     remoteTargetFlags ~= M._lastSyncedFlags
-                
-                M._updateCounter = (M._updateCounter or 0) + 1
-                if inputsChanged or stateChanged or M._updateCounter >= 15 then
-                    M._updateCounter = 0
-                    M._lastSyncedInputs.t = lastRemoteInputs.t
-                    M._lastSyncedInputs.s = lastRemoteInputs.s
-                    M._lastSyncedInputs.b = lastRemoteInputs.b
-                    M._lastSyncedInputs.c = lastRemoteInputs.c
-                    M._lastSyncedInputs.hb = lastRemoteInputs.hb
-                    M._lastSyncedRPM = remoteTargetRPM
-                    M._lastSyncedWS = remoteTargetWS
-                    M._lastSyncedGear = remoteTargetGear
-                    M._lastSyncedLights = remoteTargetLights
-                    M._lastSyncedFlags = remoteTargetFlags
+                -- Limit IPC command rate to 50 Hz (20ms interval) to prevent Vehicle VM message queue flooding
+                M._ipcTimer = (M._ipcTimer or 0) + dtReal
+                if M._ipcTimer >= 0.02 then
+                    M._ipcTimer = M._ipcTimer - 0.02
+                    if M._ipcTimer > 0.02 then M._ipcTimer = 0 end
                     
-                    local soundSyncVal = M.soundSyncEnabled and 1 or 0
-                    local wheelSyncVal = M.wheelSyncEnabled and 1 or 0
-                    local lightsSyncVal = M.lightsSyncEnabled and 1 or 0
+                    local inputsChanged = math.abs(lastRemoteInputs.t - M._lastSyncedInputs.t) > 0.01 or
+                                          math.abs(lastRemoteInputs.s - M._lastSyncedInputs.s) > 0.01 or
+                                          math.abs(lastRemoteInputs.b - M._lastSyncedInputs.b) > 0.01 or
+                                          math.abs(lastRemoteInputs.c - M._lastSyncedInputs.c) > 0.01 or
+                                          math.abs(lastRemoteInputs.hb - M._lastSyncedInputs.hb) > 0.01
                     
-                    local remoteVeh = be:getObjectByID(remoteVehicleId)
-                    if remoteVeh then
-                        local cmd = string.format("globalSyncVeh(%f,%f,%f,%f,%f,%f,%d,%f,%d,%d,%d,%d,%d)", 
-                            lastRemoteInputs.t, lastRemoteInputs.s, lastRemoteInputs.b, lastRemoteInputs.c, lastRemoteInputs.hb, 
-                            remoteTargetRPM, remoteTargetGear, remoteTargetWS, remoteTargetLights, remoteTargetFlags, 
-                            soundSyncVal, wheelSyncVal, lightsSyncVal)
-                        remoteVeh:queueLuaCommand(cmd)
+                    local stateChanged = math.abs(remoteTargetRPM - M._lastSyncedRPM) > 50 or
+                                         math.abs(remoteTargetWS - M._lastSyncedWS) > 0.5 or
+                                         remoteTargetGear ~= M._lastSyncedGear or
+                                         remoteTargetLights ~= M._lastSyncedLights or
+                                         remoteTargetFlags ~= M._lastSyncedFlags
+                    
+                    M._updateCounter = (M._updateCounter or 0) + 1
+                    if inputsChanged or stateChanged or M._updateCounter >= 10 then
+                        M._updateCounter = 0
+                        M._lastSyncedInputs.t = lastRemoteInputs.t
+                        M._lastSyncedInputs.s = lastRemoteInputs.s
+                        M._lastSyncedInputs.b = lastRemoteInputs.b
+                        M._lastSyncedInputs.c = lastRemoteInputs.c
+                        M._lastSyncedInputs.hb = lastRemoteInputs.hb
+                        M._lastSyncedRPM = remoteTargetRPM
+                        M._lastSyncedWS = remoteTargetWS
+                        M._lastSyncedGear = remoteTargetGear
+                        M._lastSyncedLights = remoteTargetLights
+                        M._lastSyncedFlags = remoteTargetFlags
+                        
+                        local soundSyncVal = M.soundSyncEnabled and 1 or 0
+                        local wheelSyncVal = M.wheelSyncEnabled and 1 or 0
+                        local lightsSyncVal = M.lightsSyncEnabled and 1 or 0
+                        
+                        local remoteVeh = be:getObjectByID(remoteVehicleId)
+                        if remoteVeh then
+                            local cmd = string.format("globalSyncVeh(%f,%f,%f,%f,%f,%f,%d,%f,%d,%d,%d,%d,%d)", 
+                                lastRemoteInputs.t, lastRemoteInputs.s, lastRemoteInputs.b, lastRemoteInputs.c, lastRemoteInputs.hb, 
+                                remoteTargetRPM, remoteTargetGear, remoteTargetWS, remoteTargetLights, remoteTargetFlags, 
+                                soundSyncVal, wheelSyncVal, lightsSyncVal)
+                            remoteVeh:queueLuaCommand(cmd)
+                        end
                     end
                 end
             end
