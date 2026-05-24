@@ -28,6 +28,12 @@ This Pull Request implements the Stage 1 milestones specified in the evolution p
   - `testNetworkEmulator`
 - **Verification**: Verified that all 21 unit tests pass successfully.
 
+### 6. Performance & Memory Leak Fixes (LuaJIT Optimizations)
+- **pcall Removal from Hot Path**: Completely removed the `pcall(function() ... end)` block from the `onUpdate` loop. This restores LuaJIT compilation for hot game-loop hooks, preventing de-optimization and avoiding 60Hz closure memory allocations.
+- **Zero-Allocation Packet Pool**: Created a file-scoped pre-allocated `packetPool` and a reusable `packetsToProcess` table, cleaned each frame via `table.clear` without de-allocating capacity. This prevents GC storms and FPS degradation during packet spikes.
+- **String Formatting Optimization**: Replaced CPU-heavy `string.format` calls with standard Lua concatenation in hot paths (e.g., `M._sessions` indexing in `processPacket`).
+
+
 ---
 ## 🧪 Verification & Output
 
