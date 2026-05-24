@@ -154,8 +154,12 @@ local smoothedRot = quat(0,0,0,1)
 
 local nickColor = ColorF(0.22, 0.74, 1.0, 1.0)
 local speedColor = ColorF(0.85, 0.85, 0.85, 0.75)
+local shadowColor = ColorI(0, 0, 0, 128)
+local chatTextColor = ColorF(1.0, 0.84, 0.0, 1.0)
+local chatShadowColor = ColorI(0, 0, 0, 180)
+local uiPosVec = vec3(0,0,0)
 
--- (Lerp/NLerp removed — no longer used; direct setPosRot at network rate)
+local bit = require("bit")
 
 -- ============================================================
 -- Adaptive Send Rate
@@ -1117,7 +1121,6 @@ local function updateRemoteVehicleBinary(data)
     local remoteVeh = be:getObjectByID(remoteVehicleId)
     if remoteVeh then
         -- 1. Handle Ghost Mode (bit 0 of flags)
-        local bit = require("bit")
         local remoteGhost = bit.band(data.flags, 1) ~= 0
         local currentGhost = remoteGhost or M.ghostModeEnabled
         if currentGhost ~= lastGhostState then
@@ -1814,14 +1817,16 @@ local function onUpdate(dtReal, dtSim)
                         vehicleCheckTimer = 0
                         local model, config = getVehicleInfo(myVeh)
                         if myId ~= myVehicleId or model ~= lastMyVehicleModel or not areConfigsEqual(config, lastMyVehicleConfig) then
+                            local isNewPhysicalVehicle = (myId ~= myVehicleId)
+                            
                             myVehicleId = myId
                             lastMyVehicleModel = model
                             lastMyVehicleConfig = config
                             log('I', 'lanMultiplayer', 'Vehicle change detected. Sending spawn packet.')
                             sendSpawn(model, config)
                             
-                            -- Register electrics change notifications
-                            if core_vehicleBridge then
+                            -- Register electrics change notifications strictly once per unique physical vehicle
+                            if isNewPhysicalVehicle and core_vehicleBridge then
                                 core_vehicleBridge.registerValueChangeNotification(myVeh, 'rpm')
                                 core_vehicleBridge.registerValueChangeNotification(myVeh, 'wheelspeed')
                                 core_vehicleBridge.registerValueChangeNotification(myVeh, 'gearIndex')
@@ -1832,6 +1837,7 @@ local function onUpdate(dtReal, dtSim)
                                 core_vehicleBridge.registerValueChangeNotification(myVeh, 'fog')
                                 core_vehicleBridge.registerValueChangeNotification(myVeh, 'lightbar')
                                 core_vehicleBridge.registerValueChangeNotification(myVeh, 'horn')
+                                log('I', 'lanMultiplayer', 'Registered core_vehicleBridge notifications for new vehicle ID: ' .. tostring(myId))
                             end
                         end
                     end
@@ -1984,19 +1990,22 @@ local function onUpdate(dtReal, dtSim)
             if remoteVehicleId and debugDrawer then
                 local remoteVeh = be:getObjectByID(remoteVehicleId)
                 if remoteVeh and remoteVeh.getPosition then
-                    local pos = remoteVeh:getPosition()
-                    pos.z = pos.z + 2.0
-                    debugDrawer:drawTextAdvanced(pos, remoteNickname or "Friend", nickColor, true, true, ColorI(0, 0, 0, 128))
-                    pos.z = pos.z - 0.5
+                    local vehPos = remoteVeh:getPosition()
+                    uiPosVec.x = vehPos.x
+                    uiPosVec.y = vehPos.y
+                    uiPosVec.z = vehPos.z + 2.0
+                    
+                    debugDrawer:drawTextAdvanced(uiPosVec, remoteNickname or "Friend", nickColor, true, true, shadowColor)
+                    
+                    uiPosVec.z = uiPosVec.z - 0.5
                     local speedText = string.format("%.0f km/h", remoteLastSpeed)
-                    debugDrawer:drawTextAdvanced(pos, speedText, speedColor, true, true, ColorI(0, 0, 0, 128))
+                    debugDrawer:drawTextAdvanced(uiPosVec, speedText, speedColor, true, true, shadowColor)
                     
                     -- Draw 3D Emote/Chat above car if timer is active
                     if M._chatTimer and M._chatTimer > 0 then
                         M._chatTimer = M._chatTimer - dtReal
-                        local chatPos = vec3(pos)
-                        chatPos.z = chatPos.z + 1.0
-                        debugDrawer:drawTextAdvanced(chatPos, string.format("[%s]: %s", remoteNickname, M._chatText), ColorF(1.0, 0.84, 0.0, 1.0), true, true, ColorI(0, 0, 0, 180))
+                        uiPosVec.z = uiPosVec.z + 1.5
+                        debugDrawer:drawTextAdvanced(uiPosVec, string.format("[%s]: %s", remoteNickname, M._chatText), chatTextColor, true, true, chatShadowColor)
                     end
                 end
             end
