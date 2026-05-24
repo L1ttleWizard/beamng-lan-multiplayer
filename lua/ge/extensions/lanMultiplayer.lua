@@ -15,6 +15,14 @@ M.adaptiveHzEnabled = true
 M.jitterBufferEnabled = true
 M.inputExtrapEnabled = true
 M.plcEnabled = true
+M.useTimeBasedExtrap = true
+M.hemisphereCheckEnabled = true
+M.netEmulatorEnabled = false
+M.debugDropRate = 0.0
+M.debugJitterMaxMs = 0
+M._lastPacketTimestamp = 0
+M._activeSessionsCount = 0
+M._cpuFrameTimeMs = 0.0
 
 M._lastSyncedRPM = 0
 M._lastSyncedWS = 0
@@ -225,6 +233,12 @@ local function notifyUI(errMsg)
             jitterBuff = M.jitterBufferEnabled,
             inputExtrap = M.inputExtrapEnabled,
             plc = M.plcEnabled,
+            useTimeBasedExtrap = M.useTimeBasedExtrap,
+            hemisphereCheck = M.hemisphereCheckEnabled,
+            netEmulator = M.netEmulatorEnabled,
+            debugDropRate = M.debugDropRate,
+            debugJitterMaxMs = M.debugJitterMaxMs,
+            loadStatus = { sessions = M._activeSessionsCount or 0, frameTimeMs = M._cpuFrameTimeMs or 0 },
             error = errMsg
         })
     end
@@ -244,7 +258,7 @@ end
 
 -- Network metrics UI update (separate event to avoid spamming the main status)
 local function notifyMetrics()
-    if guihooks and state == "CONNECTED" then
+    if guihooks and (state == "CONNECTED" or state == "HOSTING") then
         local history = getOrderedPingHistory()
         local maxPing = 1
         for i = 1, #history do
@@ -260,7 +274,8 @@ local function notifyMetrics()
             rxKBs = math.floor(rxBandwidth * 10 + 0.5) / 10,
             hz = math.floor(currentHz + 0.5),
             pingHistory = history,
-            pingMax = math.ceil(maxPing)
+            pingMax = math.ceil(maxPing),
+            loadStatus = { sessions = M._activeSessionsCount or 0, frameTimeMs = M._cpuFrameTimeMs or 0 }
         })
     end
 end
@@ -1046,6 +1061,9 @@ local function updateRemoteVehicleBinary(data)
     end
     remoteLastSeq = seq
     
+    -- Update timestamp of last received packet
+    M._lastPacketTimestamp = socket.gettime()
+    
     -- Parse target state into pre-allocated FFI objects (0 heap allocations)
     remoteTargetPos.x = data.px
     remoteTargetPos.y = data.py
@@ -1137,6 +1155,9 @@ local function updateRemoteVehicle(data)
         inputs = data.inputs
     end
     
+    -- Update timestamp of last received packet
+    M._lastPacketTimestamp = socket.gettime()
+
     -- Store target state for smoothed application in onUpdate
     remoteTargetPos.x = p.x
     remoteTargetPos.y = p.y
@@ -1199,11 +1220,26 @@ local function applySmoothedRemoteState(dtReal)
     local remoteVeh = be:getObjectByID(remoteVehicleId)
     if not remoteVeh then return end
     
-    -- Extrapolate target state using PLC (Dead Reckoning) if enabled
+    -- Calculate target position based on PLC settings
+    local targetX = remoteTargetPos.x
+    local targetY = remoteTargetPos.y
+    local targetZ = remoteTargetPos.z
+
     if M.plcEnabled then
-        remoteTargetPos.x = remoteTargetPos.x + remoteTargetVel.x * dtReal
-        remoteTargetPos.y = remoteTargetPos.y + remoteTargetVel.y * dtReal
-        remoteTargetPos.z = remoteTargetPos.z + remoteTargetVel.z * dtReal
+        if M.useTimeBasedExtrap and M._lastPacketTimestamp > 0 then
+            local timeSinceLastPacket = socket.gettime() - M._lastPacketTimestamp
+            targetX = remoteTargetPos.x + remoteTargetVel.x * timeSinceLastPacket
+            targetY = remoteTargetPos.y + remoteTargetVel.y * timeSinceLastPacket
+            targetZ = remoteTargetPos.z + remoteTargetVel.z * timeSinceLastPacket
+        else
+            -- Old dtReal-based cumulative extrapolation
+            remoteTargetPos.x = remoteTargetPos.x + remoteTargetVel.x * dtReal
+            remoteTargetPos.y = remoteTargetPos.y + remoteTargetVel.y * dtReal
+            remoteTargetPos.z = remoteTargetPos.z + remoteTargetVel.z * dtReal
+            targetX = remoteTargetPos.x
+            targetY = remoteTargetPos.y
+            targetZ = remoteTargetPos.z
+        end
     end
     
     local currentPos = remoteVeh.getPosition and remoteVeh:getPosition()
@@ -1212,9 +1248,9 @@ local function applySmoothedRemoteState(dtReal)
     local currentRot = quat(rawRot)
     
     -- Calculate distance to target
-    local dx = remoteTargetPos.x - currentPos.x
-    local dy = remoteTargetPos.y - currentPos.y
-    local dz = remoteTargetPos.z - currentPos.z
+    local dx = targetX - currentPos.x
+    local dy = targetY - currentPos.y
+    local dz = targetZ - currentPos.z
     local dist = math.sqrt(dx*dx + dy*dy + dz*dz)
     
     local currentSmoothSpeed = smoothSpeed
@@ -1225,19 +1261,51 @@ local function applySmoothedRemoteState(dtReal)
         currentSmoothSpeed = math.max(10, 30 - jitterPenalty - lossPenalty)
     end
     
+    local targetRotX = remoteTargetRot.x
+    local targetRotY = remoteTargetRot.y
+    local targetRotZ = remoteTargetRot.z
+    local targetRotW = remoteTargetRot.w
+    
+    -- Quaternion Hemisphere Check to prevent 360 flips
+    if M.hemisphereCheckEnabled then
+        local dot = currentRot.x * targetRotX + currentRot.y * targetRotY + currentRot.z * targetRotZ + currentRot.w * targetRotW
+        if dot < 0 then
+            targetRotX = -targetRotX
+            targetRotY = -targetRotY
+            targetRotZ = -targetRotZ
+            targetRotW = -targetRotW
+        end
+    end
+    
     if dist < smoothThreshold then
         -- Very close: snap directly (no visible difference)
-        remoteVeh:setPosRot(remoteTargetPos.x, remoteTargetPos.y, remoteTargetPos.z, remoteTargetRot.x, remoteTargetRot.y, remoteTargetRot.z, remoteTargetRot.w)
+        remoteVeh:setPosRot(targetX, targetY, targetZ, targetRotX, targetRotY, targetRotZ, targetRotW)
     else
         -- Smooth exponential convergence (frame-rate independent)
         local alpha = 1.0 - math.exp(-currentSmoothSpeed * dtReal)
         
         -- In-place modification of pre-allocated vec3 to avoid allocations
-        smoothedPos.x = currentPos.x + alpha * (remoteTargetPos.x - currentPos.x)
-        smoothedPos.y = currentPos.y + alpha * (remoteTargetPos.y - currentPos.y)
-        smoothedPos.z = currentPos.z + alpha * (remoteTargetPos.z - currentPos.z)
+        smoothedPos.x = currentPos.x + alpha * (targetX - currentPos.x)
+        smoothedPos.y = currentPos.y + alpha * (targetY - currentPos.y)
+        smoothedPos.z = currentPos.z + alpha * (targetZ - currentPos.z)
         
-        remoteVeh:setPosRot(smoothedPos.x, smoothedPos.y, smoothedPos.z, remoteTargetRot.x, remoteTargetRot.y, remoteTargetRot.z, remoteTargetRot.w)
+        -- NLerp rotation interpolation
+        local rx = currentRot.x + alpha * (targetRotX - currentRot.x)
+        local ry = currentRot.y + alpha * (targetRotY - currentRot.y)
+        local rz = currentRot.z + alpha * (targetRotZ - currentRot.z)
+        local rw = currentRot.w + alpha * (targetRotW - currentRot.w)
+        
+        local len = math.sqrt(rx*rx + ry*ry + rz*rz + rw*rw)
+        if len > 0.0001 then
+            rx = rx / len
+            ry = ry / len
+            rz = rz / len
+            rw = rw / len
+        else
+            rx, ry, rz, rw = targetRotX, targetRotY, targetRotZ, targetRotW
+        end
+        
+        remoteVeh:setPosRot(smoothedPos.x, smoothedPos.y, smoothedPos.z, rx, ry, rz, rw)
         
         M._debugRotTimer = (M._debugRotTimer or 0) + dtReal
         if M._debugRotTimer >= 1.0 then
@@ -1257,6 +1325,12 @@ end
 
 -- Packet processor
 local function processPacket(rawMsg, ip, port)
+    -- Track active sessions
+    if ip and port then
+        M._sessions = M._sessions or {}
+        M._sessions[string.format("%s:%d", ip, port)] = socket.gettime()
+    end
+
     -- Track RX counters
     rxPackets = rxPackets + 1
     rxBytes = rxBytes + #rawMsg
@@ -1434,52 +1508,39 @@ end
 local function receivePackets()
     if not udpSocket then return end
     
-    local latestUpdateMsg = nil
-    local latestUpdateSeq = -1
-    local latestUpdateIp = nil
-    local latestUpdatePort = nil
+    M._jitterQueue = M._jitterQueue or {}
+    local now = socket.gettime()
     
+    local packetsToProcess = {}
+    
+    -- Local helper to drop or delay incoming packets
+    local function handleIncoming(data, ip, port)
+        if M.netEmulatorEnabled then
+            if math.random() < M.debugDropRate then
+                return -- simulate drop
+            end
+            if M.debugJitterMaxMs > 0 then
+                local delay = math.random() * M.debugJitterMaxMs / 1000
+                table.insert(M._jitterQueue, {
+                    data = data,
+                    ip = ip,
+                    port = port,
+                    executeAt = now + delay
+                })
+                return -- simulate jitter delay
+            end
+        end
+        table.insert(packetsToProcess, { data = data, ip = ip, port = port })
+    end
+    
+    -- 1. Read all new packets from socket
     if role == "CLIENT" then
         while true do
             local data, err = udpSocket:receive()
             if not data then
                 break
             end
-            
-            local isUpdate = false
-            local seq = 0
-            
-            -- 1. Check for binary update packet (exact length 92, matching DPUB)
-            local m1, m2, m3, m4 = string.byte(data, 1, 4)
-            if #data == 92 and m1 == 68 and m2 == 80 and m3 == 85 and m4 == 66 then -- "DPUB"
-                isUpdate = true
-                local b1, b2, b3, b4 = string.byte(data, 5, 8)
-                seq = b1 + b2 * 256 + b3 * 65536 + b4 * 16777216
-            end
-            
-            -- 2. Fallback to check for JSON update packet
-            if not isUpdate then
-                local b1, b2, b3, b4, b5, b6, b7 = string.byte(data, 1, 7)
-                local isJsonUpdate = (b1 == 123 and b2 == 34 and b3 == 116 and b4 == 34 and b5 == 58 and b6 == 34 and b7 == 117) -- '{"t":"u"'
-                if not isJsonUpdate then
-                    local b8, b9, b10 = string.byte(data, 8, 10)
-                    isJsonUpdate = (b1 == 123 and b2 == 34 and b3 == 112 and b4 == 121 and b5 == 112 and b6 == 101 and b7 == 34 and b8 == 58 and b9 == 34 and b10 == 117) -- '{"type":"u"'
-                end
-                if isJsonUpdate then
-                    isUpdate = true
-                    local seqStr = data:match('"s":(%d+)')
-                    seq = seqStr and tonumber(seqStr) or 0
-                end
-            end
-            
-            if isUpdate then
-                if seq > latestUpdateSeq then
-                    latestUpdateSeq = seq
-                    latestUpdateMsg = data
-                end
-            else
-                processPacket(data, targetIp, targetPort)
-            end
+            handleIncoming(data, targetIp, targetPort)
         end
     else
         while true do
@@ -1487,43 +1548,68 @@ local function receivePackets()
             if not data then
                 break
             end
-            
-            local isUpdate = false
-            local seq = 0
-            
-            -- 1. Check for binary update packet (exact length 92, matching DPUB)
-            local m1, m2, m3, m4 = string.byte(data, 1, 4)
-            if #data == 92 and m1 == 68 and m2 == 80 and m3 == 85 and m4 == 66 then -- "DPUB"
+            handleIncoming(data, ip, port)
+        end
+    end
+    
+    -- 2. Process ready delayed packets from jitter queue
+    local i = 1
+    while i <= #M._jitterQueue do
+        local pkt = M._jitterQueue[i]
+        if now >= pkt.executeAt then
+            table.insert(packetsToProcess, pkt)
+            table.remove(M._jitterQueue, i)
+        else
+            i = i + 1
+        end
+    end
+    
+    -- 3. Filter update packets and keep only the latest seq
+    local latestUpdateMsg = nil
+    local latestUpdateSeq = -1
+    local latestUpdateIp = nil
+    local latestUpdatePort = nil
+    
+    for _, pkt in ipairs(packetsToProcess) do
+        local data = pkt.data
+        local ip = pkt.ip
+        local port = pkt.port
+        
+        local isUpdate = false
+        local seq = 0
+        
+        -- Check for binary update packet (exact length 92, matching DPUB)
+        local m1, m2, m3, m4 = string.byte(data, 1, 4)
+        if #data == 92 and m1 == 68 and m2 == 80 and m3 == 85 and m4 == 66 then -- "DPUB"
+            isUpdate = true
+            local b1, b2, b3, b4 = string.byte(data, 5, 8)
+            seq = b1 + b2 * 256 + b3 * 65536 + b4 * 16777216
+        end
+        
+        -- Fallback to check for JSON update packet
+        if not isUpdate then
+            local b1, b2, b3, b4, b5, b6, b7 = string.byte(data, 1, 7)
+            local isJsonUpdate = (b1 == 123 and b2 == 34 and b3 == 116 and b4 == 34 and b5 == 58 and b6 == 34 and b7 == 117) -- '{"t":"u"'
+            if not isJsonUpdate then
+                local b8, b9, b10 = string.byte(data, 8, 10)
+                isJsonUpdate = (b1 == 123 and b2 == 34 and b3 == 112 and b4 == 121 and b5 == 112 and b6 == 101 and b7 == 34 and b8 == 58 and b9 == 34 and b10 == 117) -- '{"type":"u"'
+            end
+            if isJsonUpdate then
                 isUpdate = true
-                local b1, b2, b3, b4 = string.byte(data, 5, 8)
-                seq = b1 + b2 * 256 + b3 * 65536 + b4 * 16777216
+                local seqStr = data:match('"s":(%d+)')
+                seq = seqStr and tonumber(seqStr) or 0
             end
-            
-            -- 2. Fallback to check for JSON update packet
-            if not isUpdate then
-                local b1, b2, b3, b4, b5, b6, b7 = string.byte(data, 1, 7)
-                local isJsonUpdate = (b1 == 123 and b2 == 34 and b3 == 116 and b4 == 34 and b5 == 58 and b6 == 34 and b7 == 117) -- '{"t":"u"'
-                if not isJsonUpdate then
-                    local b8, b9, b10 = string.byte(data, 8, 10)
-                    isJsonUpdate = (b1 == 123 and b2 == 34 and b3 == 112 and b4 == 121 and b5 == 112 and b6 == 101 and b7 == 34 and b8 == 58 and b9 == 34 and b10 == 117) -- '{"type":"u"'
-                end
-                if isJsonUpdate then
-                    isUpdate = true
-                    local seqStr = data:match('"s":(%d+)')
-                    seq = seqStr and tonumber(seqStr) or 0
-                end
+        end
+        
+        if isUpdate then
+            if seq > latestUpdateSeq then
+                latestUpdateSeq = seq
+                latestUpdateMsg = data
+                latestUpdateIp = ip
+                latestUpdatePort = port
             end
-            
-            if isUpdate then
-                if seq > latestUpdateSeq then
-                    latestUpdateSeq = seq
-                    latestUpdateMsg = data
-                    latestUpdateIp = ip
-                    latestUpdatePort = port
-                end
-            else
-                processPacket(data, ip, port)
-            end
+        else
+            processPacket(data, ip, port)
         end
     end
     
@@ -1832,9 +1918,29 @@ local function onUpdate(dtReal, dtSim)
                 end
             end
             
-            -- 5c. Apply remote vehicle state
+            -- 5c. Apply remote vehicle state with CPU time tracking
+            local startTime = socket.gettime()
             applySmoothedRemoteState(dtReal)
+            local duration = (socket.gettime() - startTime) * 1000 -- ms
+            M._cpuFrameTimeMs = (M._cpuFrameTimeMs or 0.0) * 0.95 + duration * 0.05
             
+            -- Track active sessions and FPS degradation if sessions > 5
+            local now = socket.gettime()
+            local sessionCount = 0
+            M._sessions = M._sessions or {}
+            for key, lastTime in pairs(M._sessions) do
+                if now - lastTime > 5.0 then
+                    M._sessions[key] = nil
+                else
+                    sessionCount = sessionCount + 1
+                end
+            end
+            M._activeSessionsCount = sessionCount
+            
+            if M._activeSessionsCount > 5 and duration > 1.0 then
+                log('W', 'lanMultiplayer', string.format('Performance degradation detected! applySmoothedRemoteState took %.2f ms with %d active sessions.', duration, M._activeSessionsCount))
+            end
+
             -- 5d. Periodic ping
             pingTimer = pingTimer + dtReal
             if pingTimer >= pingInterval then
@@ -2108,78 +2214,118 @@ local function setGhostMode(enabled)
             end
         end
     end
+    saveSettings(state ~= "IDLE")
     notifyUI()
 end
 
 local function setSoundSync(enabled)
     M.soundSyncEnabled = enabled
     log('I', 'lanMultiplayer', 'Sound sync set to: ' .. tostring(enabled))
+    saveSettings(state ~= "IDLE")
     notifyUI()
 end
 
 local function setWheelSync(enabled)
     M.wheelSyncEnabled = enabled
     log('I', 'lanMultiplayer', 'Wheel sync set to: ' .. tostring(enabled))
+    saveSettings(state ~= "IDLE")
     notifyUI()
 end
 
 local function setLightsSync(enabled)
     M.lightsSyncEnabled = enabled
     log('I', 'lanMultiplayer', 'Lights sync set to: ' .. tostring(enabled))
+    saveSettings(state ~= "IDLE")
     notifyUI()
 end
 
 local function setDamageSync(enabled)
     M.damageSyncEnabled = enabled
     log('I', 'lanMultiplayer', 'Damage sync set to: ' .. tostring(enabled))
+    saveSettings(state ~= "IDLE")
     notifyUI()
 end
 
 local function setNetworkOpt(enabled)
     M.networkOptimizationEnabled = enabled
     log('I', 'lanMultiplayer', 'Network optimization set to: ' .. tostring(enabled))
+    saveSettings(state ~= "IDLE")
     notifyUI()
 end
 
 local function setTuningSync(enabled)
     M.tuningSyncEnabled = enabled
     log('I', 'lanMultiplayer', 'Tuning sync set to: ' .. tostring(enabled))
+    saveSettings(state ~= "IDLE")
     notifyUI()
 end
 
 local function setBackfireSync(enabled)
     M.backfireSyncEnabled = enabled
     log('I', 'lanMultiplayer', 'Backfire sync set to: ' .. tostring(enabled))
+    saveSettings(state ~= "IDLE")
     notifyUI()
 end
 
 local function setRecoverySync(enabled)
     M.recoverySyncEnabled = enabled
     log('I', 'lanMultiplayer', 'Recovery sync set to: ' .. tostring(enabled))
+    saveSettings(state ~= "IDLE")
     notifyUI()
 end
 
 local function setAdaptiveHz(enabled)
     M.adaptiveHzEnabled = enabled
     log('I', 'lanMultiplayer', 'Adaptive Hz set to: ' .. tostring(enabled))
+    saveSettings(state ~= "IDLE")
     notifyUI()
 end
 
 local function setJitterBuffer(enabled)
     M.jitterBufferEnabled = enabled
     log('I', 'lanMultiplayer', 'Jitter buffer set to: ' .. tostring(enabled))
+    saveSettings(state ~= "IDLE")
     notifyUI()
 end
 
 local function setInputExtrap(enabled)
     M.inputExtrapEnabled = enabled
     log('I', 'lanMultiplayer', 'Input extrapolation set to: ' .. tostring(enabled))
+    saveSettings(state ~= "IDLE")
     notifyUI()
 end
 
 local function setPLC(enabled)
     M.plcEnabled = enabled
     log('I', 'lanMultiplayer', 'PLC set to: ' .. tostring(enabled))
+    saveSettings(state ~= "IDLE")
+    notifyUI()
+end
+
+local function setUseTimeBasedExtrap(enabled)
+    M.useTimeBasedExtrap = enabled
+    log('I', 'lanMultiplayer', 'Use Time-Based Extrapolation set to: ' .. tostring(enabled))
+    saveSettings(state ~= "IDLE")
+    notifyUI()
+end
+
+local function setHemisphereCheck(enabled)
+    M.hemisphereCheckEnabled = enabled
+    log('I', 'lanMultiplayer', 'Hemisphere check set to: ' .. tostring(enabled))
+    saveSettings(state ~= "IDLE")
+    notifyUI()
+end
+
+local function setNetEmulator(enabled)
+    M.netEmulatorEnabled = enabled
+    log('I', 'lanMultiplayer', 'Net emulator set to: ' .. tostring(enabled))
+    notifyUI()
+end
+
+local function setNetEmulatorSettings(dropRate, jitterMaxMs)
+    M.debugDropRate = tonumber(dropRate) or 0.0
+    M.debugJitterMaxMs = tonumber(jitterMaxMs) or 0
+    log('I', 'lanMultiplayer', string.format('Net emulator settings updated: dropRate=%.2f, jitterMaxMs=%d', M.debugDropRate, M.debugJitterMaxMs))
     notifyUI()
 end
 
@@ -2246,6 +2392,10 @@ M.setAdaptiveHz = setAdaptiveHz
 M.setJitterBuffer = setJitterBuffer
 M.setInputExtrap = setInputExtrap
 M.setPLC = setPLC
+M.setUseTimeBasedExtrap = setUseTimeBasedExtrap
+M.setHemisphereCheck = setHemisphereCheck
+M.setNetEmulator = setNetEmulator
+M.setNetEmulatorSettings = setNetEmulatorSettings
 M.teleportToFriend = teleportToFriend
 M.reportDamage = reportDamage
 M.chatMessage = chatMessage

@@ -549,8 +549,9 @@ tests.testPLCToggle = function()
         i = { 0, 0, 0, 0, 0 }
     })
     
-    -- 1. Test with PLC enabled (should extrapolate target position)
+    -- 1. Test with PLC enabled and time-based extrapolation disabled (old mode)
     M.plcEnabled = true
+    M.useTimeBasedExtrap = false
     M.applySmoothedRemoteState(0.1)
     assertEqual(10.5, M.getRemoteTargetPos().x, "Target pos should extrapolate by velocity * dt when PLC is enabled")
     
@@ -561,6 +562,16 @@ tests.testPLCToggle = function()
     M.plcEnabled = false
     M.applySmoothedRemoteState(0.1)
     assertEqual(10.0, M.getRemoteTargetPos().x, "Target pos should remain frozen when PLC is disabled")
+    
+    -- 3. Test with PLC enabled and time-based extrapolation enabled (new mode)
+    M.plcEnabled = true
+    M.useTimeBasedExtrap = true
+    M.getRemoteTargetPos().x = 10
+    M._lastPacketTimestamp = os.clock() - 0.1
+    
+    remoteVeh.position = vec3(0, 0, 0)
+    M.applySmoothedRemoteState(0.016)
+    assertTrue(remoteVeh.position.x > 0, "Vehicle should move towards extrapolated target position when time-based extrapolation is enabled")
 end
 
 -- 16. Tandem Scorer Test
@@ -726,6 +737,107 @@ tests.testPartConfigChangeSync = function()
         end
     end
     assertTrue(sentSpawn, "Spawn packet should be sent on part configuration change")
+end
+
+-- 20. Quaternion Hemisphere Check Test
+tests.testQuaternionHemisphereCheck = function()
+    M.resetMetrics()
+    M.connect("127.0.0.1", 27015, 0)
+    M.setState("CONNECTED")
+    
+    local mockRemoteVehId = 8888
+    local remoteVeh = createMockVehicle(mockRemoteVehId, "covet", { parts = {} })
+    M.setRemoteVehicleId(mockRemoteVehId)
+    
+    -- Setup current rotation
+    remoteVeh.rotation = quat(0, 0, 0, 1)
+    
+    -- Target rotation in a different hemisphere (dot product < 0)
+    M.updateRemoteVehicle({
+        t = "u",
+        p = { 10, 0, 0 },
+        r = { 0, 0, 0, -1 }, -- dot = -1
+        v = { 0, 0, 0 },
+        a = { 0, 0, 0 },
+        i = { 0, 0, 0, 0, 0 }
+    })
+    
+    M.hemisphereCheckEnabled = true
+    M.plcEnabled = false -- disable PLC so we focus on rotation
+    
+    -- Apply smoothed remote state. It should interpolate rotation.
+    -- With hemisphere check enabled, the target's w should be inverted (from -1 to 1).
+    M.applySmoothedRemoteState(0.1)
+    
+    -- Since the target was inverted to w = 1, it interpolates from w = 1 towards w = 1.
+    -- The resulting w component should be positive (1.0)
+    assertEqual(1, remoteVeh.rotation.w, "Resulting rotation w-component should be positive when Hemisphere Check is active")
+    
+    -- Now disable hemisphere check and verify it does NOT invert target, resulting in negative w
+    M.resetMetrics()
+    remoteVeh.rotation = quat(0, 0, 0, 1)
+    M.updateRemoteVehicle({
+        t = "u",
+        p = { 10, 0, 0 },
+        r = { 0, 0, 0, -1 },
+        v = { 0, 0, 0 },
+        a = { 0, 0, 0 },
+        i = { 0, 0, 0, 0, 0 }
+    })
+    M.hemisphereCheckEnabled = false
+    M.applySmoothedRemoteState(0.1)
+    
+    -- With smoothSpeed = 30 and dt = 0.1, alpha = 0.95.
+    -- rw = 1 + 0.95 * (-1 - 1) = -0.9.
+    -- Normalized: rx=0, ry=0, rz=0, rw=-1. So remoteVeh.rotation.w should be negative (-1).
+    assertEqual(-1, remoteVeh.rotation.w, "Resulting rotation w-component should be negative when Hemisphere Check is disabled")
+end
+
+-- 21. Network Emulator Test
+tests.testNetworkEmulator = function()
+    M.resetMetrics()
+    M.connect("127.0.0.1", 27015, 0)
+    M.setState("CONNECTED")
+    
+    local mockRemoteVehId = 8888
+    local remoteVeh = createMockVehicle(mockRemoteVehId, "covet", { parts = {} })
+    M.setRemoteVehicleId(mockRemoteVehId)
+    
+    local sock = package.loaded["socket"].getLastSocket()
+    sock:clearSent()
+    
+    M.netEmulatorEnabled = true
+    M.debugDropRate = 1.0 -- drop all packets
+    
+    -- Queue an update packet in socket
+    local testPacket = string.format('{"t":"u","s":1,"p":[10,0,0],"r":[0,0,0,1],"v":[0,0,0],"a":[0,0,0],"i":[0,0,0,0,0]}')
+    sock:queuePacket(testPacket)
+    
+    -- Call receivePackets. Since drop rate is 100%, it should NOT process the packet.
+    M.receivePackets()
+    
+    -- Verify target pos did NOT change (remains 0,0,0)
+    assertEqual(0, M.getRemoteTargetPos().x, "Packet should be dropped by network emulator")
+    
+    -- Now set drop rate to 0 and jitter to 100ms
+    M.resetMetrics()
+    M.setRemoteVehicleId(mockRemoteVehId)
+    M.debugDropRate = 0.0
+    M.debugJitterMaxMs = 100
+    
+    sock:queuePacket(testPacket)
+    
+    -- Receive packets. Since jitter > 0, it should be queued in _jitterQueue, NOT processed immediately.
+    M.receivePackets()
+    assertEqual(0, M.getRemoteTargetPos().x, "Packet should be delayed by jitter buffer")
+    
+    -- Wait 150ms and process again to verify it gets processed
+    local queue = M._jitterQueue or {}
+    assertEqual(1, #queue, "Jitter queue should have 1 packet")
+    queue[1].executeAt = os.clock() - 0.01 -- make it ready
+    
+    M.receivePackets()
+    assertEqual(10, M.getRemoteTargetPos().x, "Packet should be processed after jitter delay expires")
 end
 
 -- ============================================================================

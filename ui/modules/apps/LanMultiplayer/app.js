@@ -25,6 +25,12 @@ angular.module('beamng.apps')
       scope.jitterBuff = true;
       scope.inputExtrap = true;
       scope.plc = true;
+      scope.useTimeBasedExtrap = true;
+      scope.hemisphereCheck = true;
+      scope.netEmulator = false;
+      scope.debugDropRate = 0.0;
+      scope.debugJitterMaxMs = 0;
+      scope.loadStatus = { sessions: 0, frameTimeMs: 0.0 };
 
       // Collapsible & Chat UI states
       scope.showDevSettings = false;
@@ -192,6 +198,29 @@ angular.module('beamng.apps')
         bngApi.engineLua('extensions.lanMultiplayer.setPLC(' + scope.plc + ')');
       };
 
+      // Toggle Use Time-Based Extrapolation
+      scope.toggleUseTimeBasedExtrap = function() {
+        scope.useTimeBasedExtrap = !scope.useTimeBasedExtrap;
+        bngApi.engineLua('extensions.lanMultiplayer.setUseTimeBasedExtrap(' + scope.useTimeBasedExtrap + ')');
+      };
+
+      // Toggle Quaternion Hemisphere Check
+      scope.toggleHemisphereCheck = function() {
+        scope.hemisphereCheck = !scope.hemisphereCheck;
+        bngApi.engineLua('extensions.lanMultiplayer.setHemisphereCheck(' + scope.hemisphereCheck + ')');
+      };
+
+      // Toggle Network Emulator
+      scope.toggleNetEmulator = function() {
+        scope.netEmulator = !scope.netEmulator;
+        bngApi.engineLua('extensions.lanMultiplayer.setNetEmulator(' + scope.netEmulator + ')');
+      };
+
+      // Update Network Emulator Settings
+      scope.updateNetEmulatorSettings = function() {
+        bngApi.engineLua('extensions.lanMultiplayer.setNetEmulatorSettings(' + scope.debugDropRate + ', ' + scope.debugJitterMaxMs + ')');
+      };
+
       // Toggle Developer Settings
       scope.toggleDevSettings = function() {
         scope.showDevSettings = !scope.showDevSettings;
@@ -283,6 +312,24 @@ angular.module('beamng.apps')
           if (data.plc !== undefined) {
             scope.plc = data.plc;
           }
+          if (data.useTimeBasedExtrap !== undefined) {
+            scope.useTimeBasedExtrap = data.useTimeBasedExtrap;
+          }
+          if (data.hemisphereCheck !== undefined) {
+            scope.hemisphereCheck = data.hemisphereCheck;
+          }
+          if (data.netEmulator !== undefined) {
+            scope.netEmulator = data.netEmulator;
+          }
+          if (data.debugDropRate !== undefined) {
+            scope.debugDropRate = parseFloat(data.debugDropRate) || 0;
+          }
+          if (data.debugJitterMaxMs !== undefined) {
+            scope.debugJitterMaxMs = parseInt(data.debugJitterMaxMs) || 0;
+          }
+          if (data.loadStatus !== undefined) {
+            scope.loadStatus = data.loadStatus;
+          }
 
           scope.error = data.error || "";
 
@@ -316,6 +363,9 @@ angular.module('beamng.apps')
           scope.metrics.pingHistory = data.pingHistory || [];
           scope.metrics.pingMax = data.pingMax || 1;
           scope.metrics.sparklinePath = buildSparkline(data.pingHistory, data.pingMax);
+          if (data.loadStatus !== undefined) {
+            scope.loadStatus = data.loadStatus;
+          }
         });
       });
 

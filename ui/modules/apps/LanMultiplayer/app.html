@@ -679,12 +679,47 @@
       </div>
       
       <div style="font-size: 0.65rem; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 4px;">Network Technology</div>
-      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 10px;">
         <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': networkOpt}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleNetworkOpt()">Net Opt: {{networkOpt ? 'ON' : 'OFF'}}</button>
         <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': adaptiveHz}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleAdaptiveHz()">Adapt Hz: {{adaptiveHz ? 'ON' : 'OFF'}}</button>
         <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': jitterBuff}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleJitterBuff()">JitterBuf: {{jitterBuff ? 'ON' : 'OFF'}}</button>
         <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': inputExtrap}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleInputExtrap()">InpExtrap: {{inputExtrap ? 'ON' : 'OFF'}}</button>
-        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': plc}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem; grid-column: 1 / -1;" ng-click="togglePLC()">PLC (DR Extrap): {{plc ? 'ON' : 'OFF'}}</button>
+        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': plc}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="togglePLC()">PLC: {{plc ? 'ON' : 'OFF'}}</button>
+        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': useTimeBasedExtrap}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleUseTimeBasedExtrap()">TimeExtrap: {{useTimeBasedExtrap ? 'ON' : 'OFF'}}</button>
+        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': hemisphereCheck}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem; grid-column: 1 / -1;" ng-click="toggleHemisphereCheck()">Hemisphere Check: {{hemisphereCheck ? 'ON' : 'OFF'}}</button>
+      </div>
+      
+      <div style="font-size: 0.65rem; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 4px;">Network Emulator & Load</div>
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': netEmulator}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleNetEmulator()">Emulator: {{netEmulator ? 'ON' : 'OFF'}}</button>
+        
+        <div ng-show="netEmulator" style="display: flex; flex-direction: column; gap: 6px; background: rgba(15,23,42,0.3); padding: 8px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.03);">
+          <div>
+            <div style="display: flex; justify-content: space-between; font-size: 0.7rem; color: #94a3b8; margin-bottom: 2px;">
+              <span>Drop Rate</span>
+              <span style="font-weight: 700; color: #f87171;">{{(debugDropRate * 100) | number:0}}%</span>
+            </div>
+            <input type="range" min="0" max="1" step="0.05" ng-model="debugDropRate" ng-change="updateNetEmulatorSettings()" style="width: 100%; margin: 0; cursor: pointer;">
+          </div>
+          <div>
+            <div style="display: flex; justify-content: space-between; font-size: 0.7rem; color: #94a3b8; margin-bottom: 2px;">
+              <span>Jitter Max</span>
+              <span style="font-weight: 700; color: #fbbf24;">{{debugJitterMaxMs}} ms</span>
+            </div>
+            <input type="range" min="0" max="500" step="10" ng-model="debugJitterMaxMs" ng-change="updateNetEmulatorSettings()" style="width: 100%; margin: 0; cursor: pointer;">
+          </div>
+        </div>
+
+        <div style="background: rgba(15, 23, 42, 0.4); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 8px; padding: 8px; font-size: 0.75rem; display: flex; flex-direction: column; gap: 4px;">
+          <div style="display: flex; justify-content: space-between;">
+            <span style="color: #64748b;">Active Sessions:</span>
+            <span style="font-weight: 700; color: #e2e8f0;">{{loadStatus.sessions || 0}}</span>
+          </div>
+          <div style="display: flex; justify-content: space-between;">
+            <span style="color: #64748b;">Processing Frame:</span>
+            <span style="font-weight: 700; color: #e2e8f0;">{{loadStatus.frameTimeMs | number:2}} ms</span>
+          </div>
+        </div>
       </div>
     </div>
   </div>
