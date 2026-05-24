@@ -11,6 +11,11 @@ angular.module('beamng.apps')
       scope.nickname = "Player";
       scope.remoteNickname = "";
       scope.ghostMode = false;
+      scope.networkOpt = false;
+      scope.soundSync = true;
+      scope.wheelSync = true;
+      scope.lightsSync = true;
+      scope.damageSync = true;
 
       scope.config = {
         ip: "127.0.0.1",
@@ -90,6 +95,36 @@ angular.module('beamng.apps')
         bngApi.engineLua('extensions.lanMultiplayer.setGhostMode(' + scope.ghostMode + ')');
       };
 
+      // Toggle Network Optimization
+      scope.toggleNetworkOpt = function() {
+        scope.networkOpt = !scope.networkOpt;
+        bngApi.engineLua('extensions.lanMultiplayer.setNetworkOpt(' + scope.networkOpt + ')');
+      };
+
+      // Toggle Sound Sync
+      scope.toggleSoundSync = function() {
+        scope.soundSync = !scope.soundSync;
+        bngApi.engineLua('extensions.lanMultiplayer.setSoundSync(' + scope.soundSync + ')');
+      };
+
+      // Toggle Wheel Sync
+      scope.toggleWheelSync = function() {
+        scope.wheelSync = !scope.wheelSync;
+        bngApi.engineLua('extensions.lanMultiplayer.setWheelSync(' + scope.wheelSync + ')');
+      };
+
+      // Toggle Lights Sync
+      scope.toggleLightsSync = function() {
+        scope.lightsSync = !scope.lightsSync;
+        bngApi.engineLua('extensions.lanMultiplayer.setLightsSync(' + scope.lightsSync + ')');
+      };
+
+      // Toggle Damage Sync
+      scope.toggleDamageSync = function() {
+        scope.damageSync = !scope.damageSync;
+        bngApi.engineLua('extensions.lanMultiplayer.setDamageSync(' + scope.damageSync + ')');
+      };
+
       // Teleport to Friend
       scope.teleportToFriend = function() {
         bngApi.engineLua('extensions.lanMultiplayer.teleportToFriend()');
@@ -114,6 +149,21 @@ angular.module('beamng.apps')
           }
           if (data.ghostMode !== undefined) {
             scope.ghostMode = data.ghostMode;
+          }
+          if (data.networkOpt !== undefined) {
+            scope.networkOpt = data.networkOpt;
+          }
+          if (data.soundSync !== undefined) {
+            scope.soundSync = data.soundSync;
+          }
+          if (data.wheelSync !== undefined) {
+            scope.wheelSync = data.wheelSync;
+          }
+          if (data.lightsSync !== undefined) {
+            scope.lightsSync = data.lightsSync;
+          }
+          if (data.damageSync !== undefined) {
+            scope.damageSync = data.damageSync;
           }
 
           scope.error = data.error || "";

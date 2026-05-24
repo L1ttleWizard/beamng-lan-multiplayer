@@ -3,6 +3,11 @@
 
 local M = {}
 M.ghostModeEnabled = false
+M.soundSyncEnabled = true
+M.wheelSyncEnabled = true
+M.lightsSyncEnabled = true
+M.damageSyncEnabled = true
+M.networkOptimizationEnabled = false
 
 -- Libraries
 local socket = require("socket")
@@ -78,6 +83,14 @@ local settingsFile = "settings/lanMultiplayer.json"
 
 -- Input filtering state
 local lastRemoteInputs = { t = 0, s = 0, b = 0, c = 0, hb = 0 }
+
+-- Dead Reckoning State for Sender
+local lastSentPos = vec3(0,0,0)
+local lastSentVel = vec3(0,0,0)
+local lastSentRot = quat(0,0,0,1)
+local lastSentInputs = { t = 0, s = 0, b = 0, c = 0, hb = 0 }
+local lastSentTime = 0
+local heartbeatCounter = 0
 
 
 -- ============================================================
@@ -169,6 +182,11 @@ local function notifyUI(errMsg)
             nickname = myNickname or "Player",
             remoteNickname = remoteNickname or "",
             ghostMode = M.ghostModeEnabled,
+            soundSync = M.soundSyncEnabled,
+            wheelSync = M.wheelSyncEnabled,
+            lightsSync = M.lightsSyncEnabled,
+            damageSync = M.damageSyncEnabled,
+            networkOpt = M.networkOptimizationEnabled,
             error = errMsg
         })
     end
@@ -483,6 +501,12 @@ local function resetMetrics()
     lastRemoteInputs.b = 0
     lastRemoteInputs.c = 0
     lastRemoteInputs.hb = 0
+    lastSentPos.x = 0; lastSentPos.y = 0; lastSentPos.z = 0
+    lastSentVel.x = 0; lastSentVel.y = 0; lastSentVel.z = 0
+    lastSentRot.x = 0; lastSentRot.y = 0; lastSentRot.z = 0; lastSentRot.w = 1
+    lastSentInputs.t = 0; lastSentInputs.s = 0; lastSentInputs.b = 0; lastSentInputs.c = 0; lastSentInputs.hb = 0
+    lastSentTime = 0
+    heartbeatCounter = 0
     hasRemoteState = false
     lastGhostState = false
     remoteTargetPos.x = 0
@@ -669,8 +693,6 @@ local function sendUpdate()
     local myVeh = be:getPlayerVehicle(0)
     if not myVeh then return end
     
-    txSeq = txSeq + 1
-    
     -- Nil-safe raw field access (no fallback vec3/quat allocations)
     local pos = myVeh.getPosition and myVeh:getPosition()
     local rawRot = myVeh.getRotation and myVeh:getRotation()
@@ -686,6 +708,32 @@ local function sendUpdate()
     if angVel then ax, ay, az = angVel.x, angVel.y, angVel.z end
     
     local t, s, b, c, hb = getInputsRaw()
+    
+    -- Network Optimization / State-based Dead Reckoning
+    if M.networkOptimizationEnabled and lastSentTime > 0 then
+        local dt = os.clock() - lastSentTime
+        local predX = lastSentPos.x + lastSentVel.x * dt
+        local predY = lastSentPos.y + lastSentVel.y * dt
+        local predZ = lastSentPos.z + lastSentVel.z * dt
+        
+        local dx = pos.x - predX
+        local dy = pos.y - predY
+        local dz = pos.z - predZ
+        local errDist = math.sqrt(dx*dx + dy*dy + dz*dz)
+        
+        local inputsUnchanged = math.abs(t - lastSentInputs.t) < 0.005 and
+                                math.abs(s - lastSentInputs.s) < 0.005 and
+                                math.abs(b - lastSentInputs.b) < 0.005 and
+                                math.abs(c - lastSentInputs.c) < 0.005 and
+                                math.abs(hb - lastSentInputs.hb) < 0.005
+        
+        if errDist < 0.05 and inputsUnchanged and heartbeatCounter < 15 then
+            heartbeatCounter = heartbeatCounter + 1
+            return
+        end
+    end
+    
+    txSeq = txSeq + 1
     
     -- Read electrics cache for player vehicle
     local myId = myVeh:getId()
@@ -741,6 +789,25 @@ local function sendUpdate()
     outPacket.gear = gear
     outPacket.lights = lightsMask
     outPacket.flags = flagsMask
+    
+    -- Save sent state
+    lastSentPos.x = pos.x
+    lastSentPos.y = pos.y
+    lastSentPos.z = pos.z
+    lastSentVel.x = vx
+    lastSentVel.y = vy
+    lastSentVel.z = vz
+    lastSentRot.x = rot.x
+    lastSentRot.y = rot.y
+    lastSentRot.z = rot.z
+    lastSentRot.w = rot.w
+    lastSentInputs.t = t
+    lastSentInputs.s = s
+    lastSentInputs.b = b
+    lastSentInputs.c = c
+    lastSentInputs.hb = hb
+    lastSentTime = os.clock()
+    heartbeatCounter = 0
     
     -- Send directly as raw binary string (92 bytes)
     sendRaw(ffi.string(outPacket, 92))
@@ -938,7 +1005,8 @@ local function updateRemoteVehicleBinary(data)
     if remoteVeh then
         -- 1. Handle Ghost Mode (bit 0 of flags)
         local bit = require("bit")
-        local currentGhost = bit.band(flags, 1) ~= 0
+        local remoteGhost = bit.band(flags, 1) ~= 0
+        local currentGhost = remoteGhost or M.ghostModeEnabled
         if currentGhost ~= lastGhostState then
             lastGhostState = currentGhost
             remoteVeh:setField('collision', 0, currentGhost and 'false' or 'true')
@@ -981,8 +1049,12 @@ local function updateRemoteVehicleBinary(data)
             M._lastSyncedLights = lights
             M._lastSyncedFlags = flags
             
-            -- Format and queue single short sync command to remote vehicle VM
-            local cmd = string.format("globalSyncVeh(%f,%f,%f,%f,%f,%f,%d,%f,%d,%d)", t, s, b, c, hb, rpm, gear, wheelSpeed, lights, flags)
+            -- Format and queue single short sync command to remote vehicle VM, passing local toggle states
+            local soundSyncVal = M.soundSyncEnabled and 1 or 0
+            local wheelSyncVal = M.wheelSyncEnabled and 1 or 0
+            local lightsSyncVal = M.lightsSyncEnabled and 1 or 0
+            local cmd = string.format("globalSyncVeh(%f,%f,%f,%f,%f,%f,%d,%f,%d,%d,%d,%d,%d)", 
+                t, s, b, c, hb, rpm, gear, wheelSpeed, lights, flags, soundSyncVal, wheelSyncVal, lightsSyncVal)
             remoteVeh:queueLuaCommand(cmd)
         end
     end
@@ -1100,6 +1172,13 @@ local function applySmoothedRemoteState(dtReal)
     
     local remoteVeh = be:getObjectByID(remoteVehicleId)
     if not remoteVeh then return end
+    
+    -- Extrapolate target state if network optimization is enabled
+    if M.networkOptimizationEnabled then
+        remoteTargetPos.x = remoteTargetPos.x + remoteTargetVel.x * dtReal
+        remoteTargetPos.y = remoteTargetPos.y + remoteTargetVel.y * dtReal
+        remoteTargetPos.z = remoteTargetPos.z + remoteTargetVel.z * dtReal
+    end
     
     local currentPos = remoteVeh.getPosition and remoteVeh:getPosition()
     local currentRot = remoteVeh.getRotation and remoteVeh:getRotation()
@@ -1273,7 +1352,7 @@ local function processPacket(rawMsg, ip, port)
                 end
             end
         elseif msgType == "damage" then
-            if remoteVehicleId then
+            if M.damageSyncEnabled and remoteVehicleId then
                 local remoteVeh = be:getObjectByID(remoteVehicleId)
                 if remoteVeh then
                     remoteVeh:queueLuaCommand(string.format("globalApplyDeformedNodes(%s)", jsonEncode(msg.nodes)))
@@ -1596,39 +1675,45 @@ local function onVehicleSpawned(id)
             
             -- Inject sync and damage helpers into vehicle Lua VM
             local initScript = [[
-            globalSyncVeh = function(t, s, b, c, hb, rpm, gear, ws, lights, flags)
+            globalSyncVeh = function(t, s, b, c, hb, rpm, gear, ws, lights, flags, soundSync, wheelSync, lightsSync)
                 input.event('throttle', t, 1)
                 input.event('steering', s, 1)
                 input.event('brake', b, 1)
                 input.event('clutch', c, 1)
                 input.event('handbrake', hb, 1)
-                if mainEngine then
-                    mainEngine.rpm = rpm
-                    mainEngine.visualRPM = rpm
-                    mainEngine.inputAV = rpm * 0.104719755
+                if soundSync ~= 0 then
+                    if mainEngine then
+                        mainEngine.rpm = rpm
+                        mainEngine.visualRPM = rpm
+                        mainEngine.inputAV = rpm * 0.104719755
+                    end
+                    if gearbox then
+                        gearbox.gearIndex = gear
+                    end
+                    electrics.values.rpm = rpm
+                    electrics.values.rpmSpin = rpm
+                    electrics.values.gearIndex = gear
+                    electrics.values.gear = gear
                 end
-                if gearbox then
-                    gearbox.gearIndex = gear
-                end
-                electrics.values.rpm = rpm
-                electrics.values.rpmSpin = rpm
-                electrics.values.gearIndex = gear
-                electrics.values.gear = gear
-                electrics.values.wheelspeed = ws
-                if wheels then
-                    for _, w in ipairs(wheels.wheels) do
-                        w.angularVelocity = ws
-                        w.angularVelocityBrakeCouple = ws
+                if wheelSync ~= 0 then
+                    electrics.values.wheelspeed = ws
+                    if wheels then
+                        for _, w in ipairs(wheels.wheels) do
+                            w.angularVelocity = ws
+                            w.angularVelocityBrakeCouple = ws
+                        end
                     end
                 end
-                if electrics.setLightsState then
-                    electrics.setLightsState(bit.band(lights, 1) ~= 0 and 1 or 0)
-                    electrics.set_left_signal(bit.band(lights, 2) ~= 0)
-                    electrics.set_right_signal(bit.band(lights, 4) ~= 0)
-                    electrics.set_warn_signal(bit.band(lights, 8) ~= 0)
-                    electrics.set_fog_lights(bit.band(lights, 16) ~= 0)
-                    electrics.set_lightbar_signal(bit.band(lights, 32) ~= 0 and 1 or 0)
-                    electrics.horn(bit.band(lights, 64) ~= 0)
+                if lightsSync ~= 0 then
+                    if electrics.setLightsState then
+                        electrics.setLightsState(bit.band(lights, 1) ~= 0 and 1 or 0)
+                        electrics.set_left_signal(bit.band(lights, 2) ~= 0)
+                        electrics.set_right_signal(bit.band(lights, 4) ~= 0)
+                        electrics.set_warn_signal(bit.band(lights, 8) ~= 0)
+                        electrics.set_fog_lights(bit.band(lights, 16) ~= 0)
+                        electrics.set_lightbar_signal(bit.band(lights, 32) ~= 0 and 1 or 0)
+                        electrics.horn(bit.band(lights, 64) ~= 0)
+                    end
                 end
             end
             globalApplyDeformedNodes = function(nodes)
@@ -1683,6 +1768,54 @@ end
 local function setGhostMode(enabled)
     M.ghostModeEnabled = enabled
     log('I', 'lanMultiplayer', 'Ghost mode set to: ' .. tostring(enabled))
+    
+    -- Immediately update remote vehicle collision if it exists
+    if remoteVehicleId then
+        local remoteVeh = be:getObjectByID(remoteVehicleId)
+        if remoteVeh then
+            local bit = require("bit")
+            local remoteGhost = false
+            if M._lastSyncedFlags then
+                remoteGhost = bit.band(M._lastSyncedFlags, 1) ~= 0
+            end
+            local currentGhost = remoteGhost or M.ghostModeEnabled
+            if currentGhost ~= lastGhostState then
+                lastGhostState = currentGhost
+                remoteVeh:setField('collision', 0, currentGhost and 'false' or 'true')
+                remoteVeh:setField('collisionType', 0, currentGhost and 'None' or 'Collision Mesh')
+            end
+        end
+    end
+    notifyUI()
+end
+
+local function setSoundSync(enabled)
+    M.soundSyncEnabled = enabled
+    log('I', 'lanMultiplayer', 'Sound sync set to: ' .. tostring(enabled))
+    notifyUI()
+end
+
+local function setWheelSync(enabled)
+    M.wheelSyncEnabled = enabled
+    log('I', 'lanMultiplayer', 'Wheel sync set to: ' .. tostring(enabled))
+    notifyUI()
+end
+
+local function setLightsSync(enabled)
+    M.lightsSyncEnabled = enabled
+    log('I', 'lanMultiplayer', 'Lights sync set to: ' .. tostring(enabled))
+    notifyUI()
+end
+
+local function setDamageSync(enabled)
+    M.damageSyncEnabled = enabled
+    log('I', 'lanMultiplayer', 'Damage sync set to: ' .. tostring(enabled))
+    notifyUI()
+end
+
+local function setNetworkOpt(enabled)
+    M.networkOptimizationEnabled = enabled
+    log('I', 'lanMultiplayer', 'Network optimization set to: ' .. tostring(enabled))
     notifyUI()
 end
 
@@ -1714,6 +1847,11 @@ M.disconnect = disconnect
 M.requestStatus = notifyUI
 M.setNickname = setNickname
 M.setGhostMode = setGhostMode
+M.setSoundSync = setSoundSync
+M.setWheelSync = setWheelSync
+M.setLightsSync = setLightsSync
+M.setDamageSync = setDamageSync
+M.setNetworkOpt = setNetworkOpt
 M.teleportToFriend = teleportToFriend
 M.reportDamage = reportDamage
 
@@ -1728,6 +1866,7 @@ M.applySmoothedRemoteState = applySmoothedRemoteState
 M.sendUpdate = sendUpdate
 M.receivePackets = receivePackets
 M.resetMetrics = resetMetrics
+M.processPacket = processPacket
 M.adaptSendRate = adaptSendRate
 M.setTargetIp = function(ip) targetIp = ip end
 M.setTargetPort = function(port) targetPort = port end

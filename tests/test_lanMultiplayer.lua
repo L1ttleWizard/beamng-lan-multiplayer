@@ -353,6 +353,114 @@ tests.testOnUpdateDrawing = function()
     assertNear(31.5, draw2.pos.z) -- pos.z - 0.5 (from 32.0)
 end
 
+-- 11. Feature Toggles & Synchronization Decoupling Test
+tests.testFeatureToggles = function()
+    -- Set up connection
+    M.connect("127.0.0.1", 27015, 0)
+    M.setState("CONNECTED")
+    
+    -- Mock remote vehicle
+    local mockRemoteVehId = 7777
+    local remoteVeh = createMockVehicle(mockRemoteVehId, "covet", nil)
+    M.setRemoteVehicleId(mockRemoteVehId)
+    
+    -- Test with all features enabled
+    M.soundSyncEnabled = true
+    M.wheelSyncEnabled = true
+    M.lightsSyncEnabled = true
+    M.damageSyncEnabled = true
+    
+    -- Build a mock FFI data packet
+    local packet = ffi.new("UpdatePacket")
+    packet.seq = 100
+    packet.px, packet.py, packet.pz = 10, 20, 30
+    packet.rpm = 2000
+    packet.wheelSpeed = 30.0
+    packet.gear = 4
+    packet.lights = 7
+    
+    remoteVeh.queuedCommands = {}
+    M.updateRemoteVehicleBinary(packet)
+    
+    assertEqual(1, #remoteVeh.queuedCommands)
+    local cmd = remoteVeh.queuedCommands[1]
+    assertTrue(cmd:find("globalSyncVeh") ~= nil)
+    assertTrue(cmd:find("2000.000000,4,30.000000,7") ~= nil, "Should pass RPM, gear, wheelSpeed, lights when enabled")
+    
+    -- Test with features disabled
+    M.soundSyncEnabled = false
+    M.wheelSyncEnabled = false
+    M.lightsSyncEnabled = false
+    
+    -- Force update execution by setting syncCounter to 15 (heartbeat override)
+    M._syncCounter = 15
+    remoteVeh.queuedCommands = {}
+    M.updateRemoteVehicleBinary(packet)
+    
+    assertEqual(1, #remoteVeh.queuedCommands)
+    local cmd2 = remoteVeh.queuedCommands[1]
+    assertTrue(cmd2:find(",0,0,0") ~= nil, "Should pass 0 for sync parameters when disabled")
+    
+    -- Test damage sync toggle
+    M.damageSyncEnabled = false
+    local damageReported = false
+    remoteVeh.queuedCommands = {}
+    M.processPacket(jsonEncode({
+        type = "damage",
+        nodes = { ["1"] = { 0, 0, 0 } }
+    }), "127.0.0.1", 27015)
+    for _, c in ipairs(remoteVeh.queuedCommands) do
+        if c:find("globalApplyDeformedNodes") then
+            damageReported = true
+        end
+    end
+    assertFalse(damageReported, "Damage should not be applied when damageSync is disabled")
+end
+
+-- 12. Dead Reckoning / Packet Skipping Test
+tests.testDeadReckoning = function()
+    M.resetMetrics()
+    M.connect("127.0.0.1", 27015, 0)
+    M.setState("CONNECTED")
+    
+    local sock = package.loaded["socket"].getLastSocket()
+    sock:clearSent()
+    
+    -- Set up player vehicle mock
+    local myVeh = createMockVehicle(1, "covet", nil)
+    myVeh.position = vec3(0, 0, 0)
+    myVeh.rotation = quat(0, 0, 0, 1)
+    myVeh.velocity = vec3(10, 0, 0) -- 10 m/s along X
+    be.playerVehicle = myVeh
+    
+    -- Enable network optimization
+    M.networkOptimizationEnabled = true
+    
+    -- Send first update to initialize lastSentPos
+    M.sendUpdate()
+    assertEqual(1, #sock._sent, "First update should always be sent")
+    sock:clearSent()
+    
+    -- Mock small elapsed time (0.016s) and exact matching movement (10 m/s * 0.016s = 0.16m along X)
+    local originalClock = os.clock
+    local timeOffset = 0.016
+    os.clock = function() return originalClock() + timeOffset end
+    
+    myVeh.position = vec3(0.16, 0, 0)
+    M.sendUpdate()
+    assertEqual(0, #sock._sent, "Update should be skipped since error is 0 and inputs are unchanged")
+    
+    -- Mock deviation (actual position drifts from prediction by 0.1m, which is > 0.05m threshold)
+    timeOffset = 0.032
+    myVeh.position = vec3(0.32 + 0.1, 0, 0)
+    M.sendUpdate()
+    assertEqual(1, #sock._sent, "Update should be sent because prediction drift exceeds threshold")
+    sock:clearSent()
+    
+    -- Restore clock
+    os.clock = originalClock
+end
+
 -- ============================================================================
 -- TEST RUNNER ENGINE
 -- ============================================================================
