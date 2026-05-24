@@ -398,8 +398,9 @@ tests.testFeatureToggles = function()
     M.wheelSyncEnabled = false
     M.lightsSyncEnabled = false
     
-    -- Force update execution by setting updateCounter to 15 (heartbeat override)
-    M._updateCounter = 15
+    -- Force update execution by setting updateCounter to 25 (heartbeat override)
+    M._updateCounter = 25
+    M._ipcTimer = 0.04
     remoteVeh.queuedCommands = {}
     M.updateRemoteVehicleBinary(packet)
     M.onUpdate(0.016, 0.016)
@@ -603,6 +604,7 @@ tests.testTandemScorer = function()
     local myVeh = createMockVehicle(2, "covet", { parts = {} })
     myVeh.position = vec3(0, 0, 0)
     myVeh.velocity = vec3(10.0, 0, 0)
+    myVeh.rotation = quat(0, 0, 0.6087614, 0.7933533)
     be.playerVehicle = myVeh
     
     -- Trigger onUpdate to calculate tandem metrics. Both vehicles drift at 15 degrees.

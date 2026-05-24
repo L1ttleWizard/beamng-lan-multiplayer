@@ -152,6 +152,8 @@ local smoothThreshold = 0.02    -- meters: below this, just snap directly
 -- Pre-allocated objects to avoid garbage collection pressure
 local smoothedPos = vec3(0,0,0)
 local smoothedRot = quat(0,0,0,1)
+local telemetryPayload = { rpm = 0, speed = 0, gear = 0, throttle = 0, steering = 0, brake = 0 }
+local tandemPayload = { dist = 0, speedDiff = 0, angleDiff = 0, score = 0 }
 
 local nickColor = ColorF(0.22, 0.74, 1.0, 1.0)
 local speedColor = ColorF(0.85, 0.85, 0.85, 0.75)
@@ -542,7 +544,10 @@ end
 -- Reset network metrics
 local function resetMetrics()
     M._jitterQueue = {}
-    M._ipcTimer = 0.02
+    M._ipcTimer = 0.04
+    M._sessions = {}
+    M._lastFormattedSpeed = -1
+    M._remoteLastSpeedStr = "0 km/h"
     currentPing = 0
     currentJitter = 0
     pingSeq = 0
@@ -797,15 +802,15 @@ local function sendPacket(payload)
 end
 
 -- Send update packet with zero Lua-GC allocations using binary FFI struct
-local function sendUpdate()
-    local myVeh = be:getPlayerVehicle(0)
+local function sendUpdate(myVeh)
+    myVeh = myVeh or be:getPlayerVehicle(0)
     if not myVeh then return end
     
     -- Nil-safe raw field access (no fallback vec3/quat allocations)
     local pos = myVeh.getPosition and myVeh:getPosition()
     local rawRot = myVeh.getRotation and myVeh:getRotation()
     if not pos or not rawRot then return end
-    local rot = quat(rawRot)
+    local rot = rawRot
     
     local vx, vy, vz = 0, 0, 0
     local vel = myVeh.getVelocity and myVeh:getVelocity()
@@ -1005,6 +1010,24 @@ local function updateMetricsWindow()
     txBandwidth = txBytes / 1024   -- KB/s
     rxBandwidth = rxBytes / 1024   -- KB/s
     
+    -- Cleanup and count active sessions (moved from hot path)
+    local now = socket.gettime()
+    local sessionCount = 0
+    M._sessions = M._sessions or {}
+    for ip, ports in pairs(M._sessions) do
+        for port, lastTime in pairs(ports) do
+            if now - lastTime > 5.0 then
+                ports[port] = nil
+            else
+                sessionCount = sessionCount + 1
+            end
+        end
+        if not next(ports) then
+            M._sessions[ip] = nil
+        end
+    end
+    M._activeSessionsCount = sessionCount
+    
     -- Calculate packet loss
     if remoteTotalExpected > 0 then
         packetLoss = (remoteLostCount / remoteTotalExpected) * 100
@@ -1063,8 +1086,9 @@ local function setNickname(name)
 end
 
 -- Store remote vehicle target state from binary packet (0 allocations for JSON decoding)
-local function updateRemoteVehicleBinary(data)
+local function updateRemoteVehicleBinary(data, remoteVeh)
     if not remoteVehicleId then return end
+    remoteVeh = remoteVeh or (remoteVehicleId and be:getObjectByID(remoteVehicleId))
     
     -- Track packet loss via sequence numbers
     local seq = data.seq
@@ -1119,7 +1143,6 @@ local function updateRemoteVehicleBinary(data)
     remoteTargetLights = data.lights
     remoteTargetFlags = data.flags
     
-    local remoteVeh = be:getObjectByID(remoteVehicleId)
     if remoteVeh then
         -- 1. Handle Ghost Mode (bit 0 of flags)
         local remoteGhost = bit.band(data.flags, 1) ~= 0
@@ -1232,11 +1255,9 @@ local function updateRemoteVehicle(data)
 end
 
 -- Apply smoothed remote vehicle state every frame using pre-allocated objects
-local function applySmoothedRemoteState(dtReal)
-    if not remoteVehicleId or not hasRemoteState then return end
-    
-    local remoteVeh = be:getObjectByID(remoteVehicleId)
-    if not remoteVeh then return end
+local function applySmoothedRemoteState(dtReal, remoteVeh)
+    remoteVeh = remoteVeh or (remoteVehicleId and be:getObjectByID(remoteVehicleId))
+    if not remoteVeh or not hasRemoteState then return end
     
     -- Calculate target position based on PLC settings
     local targetX = remoteTargetPos.x
@@ -1263,7 +1284,7 @@ local function applySmoothedRemoteState(dtReal)
     local currentPos = remoteVeh.getPosition and remoteVeh:getPosition()
     local rawRot = remoteVeh.getRotation and remoteVeh:getRotation()
     if not currentPos or not rawRot then return end
-    local currentRot = quat(rawRot)
+    local currentRot = rawRot
     
     -- Calculate distance to target
     local dx = targetX - currentPos.x
@@ -1342,11 +1363,17 @@ local function applySmoothedRemoteState(dtReal)
 end
 
 -- Packet processor
-local function processPacket(rawMsg, ip, port)
-    -- Track active sessions
+local function processPacket(rawMsg, ip, port, remoteVeh)
+    remoteVeh = remoteVeh or (remoteVehicleId and be:getObjectByID(remoteVehicleId))
+    -- Track active sessions without string formatting allocations
     if ip and port then
         M._sessions = M._sessions or {}
-        M._sessions[ip .. ":" .. port] = socket.gettime()
+        local ipTable = M._sessions[ip]
+        if not ipTable then
+            ipTable = {}
+            M._sessions[ip] = ipTable
+        end
+        ipTable[port] = socket.gettime()
     end
 
     -- Track RX counters
@@ -1358,7 +1385,7 @@ local function processPacket(rawMsg, ip, port)
     if #rawMsg == 92 and m1 == 68 and m2 == 80 and m3 == 85 and m4 == 66 then -- "DPUB"
         lastPacketTime = os.clock()
         ffi.copy(inPacket, rawMsg, 92)
-        updateRemoteVehicleBinary(inPacket)
+        updateRemoteVehicleBinary(inPacket, remoteVeh)
         return
     end
     
@@ -1560,7 +1587,8 @@ local function handleIncoming(data, ip, port, now)
 end
 
 -- Read socket inputs and drop duplicate/old updates to avoid buffer bloat and ping spikes
-local function receivePackets()
+local function receivePackets(remoteVeh)
+    remoteVeh = remoteVeh or (remoteVehicleId and be:getObjectByID(remoteVehicleId))
     if not udpSocket then return end
     
     M._jitterQueue = M._jitterQueue or {}
@@ -1600,7 +1628,8 @@ local function receivePackets()
     local latestUpdateIp = nil
     local latestUpdatePort = nil
     
-    for _, pkt in ipairs(packetsToProcess) do
+    for i = 1, #packetsToProcess do
+        local pkt = packetsToProcess[i]
         local data = pkt.data
         local ip = pkt.ip
         local port = pkt.port
@@ -1639,13 +1668,13 @@ local function receivePackets()
                 latestUpdatePort = port
             end
         else
-            processPacket(data, ip, port)
+            processPacket(data, ip, port, remoteVeh)
         end
     end
     
     -- Process ONLY the latest update packet from this frame's network buffer
     if latestUpdateMsg then
-        processPacket(latestUpdateMsg, latestUpdateIp or targetIp, latestUpdatePort or targetPort)
+        processPacket(latestUpdateMsg, latestUpdateIp or targetIp, latestUpdatePort or targetPort, remoteVeh)
     end
 end
 
@@ -1703,7 +1732,7 @@ local function checkTimeout()
     end
 end
 
---- Main Game Loop update hook
+----- Main Game Loop update hook
 local function onUpdate(dtReal, dtSim)
     -- 1. If IDLE, only poll discovery and clean old lobbies
     if state == "IDLE" then
@@ -1769,8 +1798,18 @@ local function onUpdate(dtReal, dtSim)
         discoveryRecvSocket = nil
     end
     
+    -- Resolve vehicles once at start of frame to avoid getObjectByID wrappers overhead in hot path
+    local remoteVeh = nil
+    if remoteVehicleId then
+        remoteVeh = be:getObjectByID(remoteVehicleId)
+        if not remoteVeh then
+            remoteVehicleId = nil
+        end
+    end
+    local myVeh = be:getPlayerVehicle(0)
+    
     -- 1. Receive packets
-    receivePackets()
+    receivePackets(remoteVeh)
     
     -- 2. Handle handshake if connecting
     handleConnectingHandshake(dtReal)
@@ -1816,7 +1855,6 @@ local function onUpdate(dtReal, dtSim)
                 sendTimer = 0
             end
             
-            local myVeh = be:getPlayerVehicle(0)
             if myVeh then
                 local myId = myVeh:getId()
                 
@@ -1868,7 +1906,7 @@ local function onUpdate(dtReal, dtSim)
                     local dist = currentPos:distance(prevLocalPos)
                     local speed = myVeh:getVelocity():length()
                     if M.recoverySyncEnabled and dist > 10.0 and speed < 5.0 then
-                        local rot = quat(myVeh:getRotation())
+                        local rot = myVeh:getRotation()
                         sendPacket({
                             type = "recovery",
                             pos = { x = currentPos.x, y = currentPos.y, z = currentPos.z },
@@ -1882,12 +1920,12 @@ local function onUpdate(dtReal, dtSim)
                 prevLocalPos.z = currentPos.z
                 prevLocalPosInitialized = true
                 
-                sendUpdate()
+                sendUpdate(myVeh)
             end
         end
         
         -- 5b. Decoupled input extrapolation / smoothing
-        if remoteVehicleId and hasRemoteState then
+        if remoteVeh and hasRemoteState then
             if M.inputExtrapEnabled then
                 local alpha = 1.0 - math.exp(-15 * dtReal)
                 lastRemoteInputs.t = lastRemoteInputs.t + alpha * (remoteTargetInputs.t - lastRemoteInputs.t)
@@ -1903,26 +1941,26 @@ local function onUpdate(dtReal, dtSim)
                 lastRemoteInputs.hb = remoteTargetInputs.hb
             end
             
-            -- Limit IPC command rate to 50 Hz (20ms interval) to prevent Vehicle VM message queue flooding
+            -- Limit IPC command rate to 25 Hz (40ms interval) to prevent Vehicle VM message queue flooding
             M._ipcTimer = (M._ipcTimer or 0) + dtReal
-            if M._ipcTimer >= 0.02 then
-                M._ipcTimer = M._ipcTimer - 0.02
-                if M._ipcTimer > 0.02 then M._ipcTimer = 0 end
+            if M._ipcTimer >= 0.04 then
+                M._ipcTimer = M._ipcTimer - 0.04
+                if M._ipcTimer > 0.04 then M._ipcTimer = 0 end
                 
-                local inputsChanged = math.abs(lastRemoteInputs.t - M._lastSyncedInputs.t) > 0.01 or
-                                      math.abs(lastRemoteInputs.s - M._lastSyncedInputs.s) > 0.01 or
-                                      math.abs(lastRemoteInputs.b - M._lastSyncedInputs.b) > 0.01 or
-                                      math.abs(lastRemoteInputs.c - M._lastSyncedInputs.c) > 0.01 or
-                                      math.abs(lastRemoteInputs.hb - M._lastSyncedInputs.hb) > 0.01
+                local inputsChanged = math.abs(lastRemoteInputs.t - M._lastSyncedInputs.t) > 0.02 or
+                                      math.abs(lastRemoteInputs.s - M._lastSyncedInputs.s) > 0.02 or
+                                      math.abs(lastRemoteInputs.b - M._lastSyncedInputs.b) > 0.02 or
+                                      math.abs(lastRemoteInputs.c - M._lastSyncedInputs.c) > 0.02 or
+                                      math.abs(lastRemoteInputs.hb - M._lastSyncedInputs.hb) > 0.02
                 
-                local stateChanged = math.abs(remoteTargetRPM - M._lastSyncedRPM) > 50 or
-                                     math.abs(remoteTargetWS - M._lastSyncedWS) > 0.5 or
+                local stateChanged = math.abs(remoteTargetRPM - M._lastSyncedRPM) > 150 or
+                                     math.abs(remoteTargetWS - M._lastSyncedWS) > 1.5 or
                                      remoteTargetGear ~= M._lastSyncedGear or
                                      remoteTargetLights ~= M._lastSyncedLights or
                                      remoteTargetFlags ~= M._lastSyncedFlags
                 
                 M._updateCounter = (M._updateCounter or 0) + 1
-                if inputsChanged or stateChanged or M._updateCounter >= 10 then
+                if inputsChanged or stateChanged or M._updateCounter >= 25 then
                     M._updateCounter = 0
                     M._lastSyncedInputs.t = lastRemoteInputs.t
                     M._lastSyncedInputs.s = lastRemoteInputs.s
@@ -1939,41 +1977,23 @@ local function onUpdate(dtReal, dtSim)
                     local wheelSyncVal = M.wheelSyncEnabled and 1 or 0
                     local lightsSyncVal = M.lightsSyncEnabled and 1 or 0
                     
-                    local remoteVeh = be:getObjectByID(remoteVehicleId)
-                    if remoteVeh then
-                        local cmd = string.format("globalSyncVeh(%f,%f,%f,%f,%f,%f,%d,%f,%d,%d,%d,%d,%d)", 
-                            lastRemoteInputs.t, lastRemoteInputs.s, lastRemoteInputs.b, lastRemoteInputs.c, lastRemoteInputs.hb, 
-                            remoteTargetRPM, remoteTargetGear, remoteTargetWS, remoteTargetLights, remoteTargetFlags, 
-                            soundSyncVal, wheelSyncVal, lightsSyncVal)
-                        remoteVeh:queueLuaCommand(cmd)
-                    end
+                    local cmd = string.format("globalSyncVeh(%f,%f,%f,%f,%f,%f,%d,%f,%d,%d,%d,%d,%d)", 
+                        lastRemoteInputs.t, lastRemoteInputs.s, lastRemoteInputs.b, lastRemoteInputs.c, lastRemoteInputs.hb, 
+                        remoteTargetRPM, remoteTargetGear, remoteTargetWS, remoteTargetLights, remoteTargetFlags, 
+                        soundSyncVal, wheelSyncVal, lightsSyncVal)
+                    remoteVeh:queueLuaCommand(cmd)
                 end
             end
         end
         
         -- 5c. Apply remote vehicle state with CPU time tracking
         local startTime = socket.gettime()
-        applySmoothedRemoteState(dtReal)
+        applySmoothedRemoteState(dtReal, remoteVeh)
         local duration = (socket.gettime() - startTime) * 1000 -- ms
         M._cpuFrameTimeMs = (M._cpuFrameTimeMs or 0.0) * 0.95 + duration * 0.05
         
-        -- Track active sessions and FPS degradation if sessions > 5
-        local now = socket.gettime()
-        local sessionCount = 0
-        M._sessions = M._sessions or {}
-        for key, lastTime in pairs(M._sessions) do
-            if now - lastTime > 5.0 then
-                M._sessions[key] = nil
-            else
-                sessionCount = sessionCount + 1
-            end
-        end
-        M._activeSessionsCount = sessionCount
+        -- sessions cleanup moved to 1Hz updateMetricsWindow to avoid NYI pairs() in hot path
         
-        if M._activeSessionsCount > 5 and duration > 1.0 then
-            log('W', 'lanMultiplayer', string.format('Performance degradation detected! applySmoothedRemoteState took %.2f ms with %d active sessions.', duration, M._activeSessionsCount))
-        end
-
         -- 5d. Periodic ping
         pingTimer = pingTimer + dtReal
         if pingTimer >= pingInterval then
@@ -1996,26 +2016,29 @@ local function onUpdate(dtReal, dtSim)
         end
         
         -- 5g. Draw nickname + speed + active chat in 3D above remote vehicle
-        if remoteVehicleId and debugDrawer then
-            local remoteVeh = be:getObjectByID(remoteVehicleId)
-            if remoteVeh and remoteVeh.getPosition then
-                local vehPos = remoteVeh:getPosition()
-                uiPosVec.x = vehPos.x
-                uiPosVec.y = vehPos.y
-                uiPosVec.z = vehPos.z + 2.0
-                
-                debugDrawer:drawTextAdvanced(uiPosVec, remoteNickname or "Friend", nickColor, true, true, shadowColor)
-                
-                uiPosVec.z = uiPosVec.z - 0.5
-                local speedText = string.format("%.0f km/h", remoteLastSpeed)
-                debugDrawer:drawTextAdvanced(uiPosVec, speedText, speedColor, true, true, shadowColor)
-                
-                -- Draw 3D Emote/Chat above car if timer is active
-                if M._chatTimer and M._chatTimer > 0 then
-                    M._chatTimer = M._chatTimer - dtReal
-                    uiPosVec.z = uiPosVec.z + 1.5
-                    debugDrawer:drawTextAdvanced(uiPosVec, string.format("[%s]: %s", remoteNickname, M._chatText), chatTextColor, true, true, chatShadowColor)
-                end
+        if remoteVeh and debugDrawer then
+            local vehPos = remoteVeh:getPosition()
+            uiPosVec.x = vehPos.x
+            uiPosVec.y = vehPos.y
+            uiPosVec.z = vehPos.z + 2.0
+            
+            debugDrawer:drawTextAdvanced(uiPosVec, remoteNickname or "Friend", nickColor, true, true, shadowColor)
+            
+            uiPosVec.z = uiPosVec.z - 0.5
+            
+            -- Optimize string formatting by caching and using standard concatenation
+            local speedInt = math.floor(remoteLastSpeed + 0.5)
+            if speedInt ~= M._lastFormattedSpeed then
+                M._lastFormattedSpeed = speedInt
+                M._remoteLastSpeedStr = tostring(speedInt) .. " km/h"
+            end
+            debugDrawer:drawTextAdvanced(uiPosVec, M._remoteLastSpeedStr or "0 km/h", speedColor, true, true, shadowColor)
+            
+            -- Draw 3D Emote/Chat above car if timer is active
+            if M._chatTimer and M._chatTimer > 0 then
+                M._chatTimer = M._chatTimer - dtReal
+                uiPosVec.z = uiPosVec.z + 1.5
+                debugDrawer:drawTextAdvanced(uiPosVec, "[" .. (remoteNickname or "Friend") .. "]: " .. (M._chatText or ""), chatTextColor, true, true, chatShadowColor)
             end
         end
         
@@ -2023,60 +2046,73 @@ local function onUpdate(dtReal, dtSim)
         M._uiTelemetryTimer = (M._uiTelemetryTimer or 0) + dtReal
         if M._uiTelemetryTimer >= 0.1 then
             M._uiTelemetryTimer = 0
-            local myVeh = be:getPlayerVehicle(0)
             if myVeh then
                 -- Trigger Remote Telemetry HUD Update
-                guihooks.trigger("lanMultiplayerRemoteTelemetry", {
-                    rpm = remoteTargetRPM,
-                    speed = remoteLastSpeed,
-                    gear = remoteTargetGear,
-                    throttle = lastRemoteInputs.t,
-                    steering = lastRemoteInputs.s,
-                    brake = lastRemoteInputs.b
-                })
+                telemetryPayload.rpm = remoteTargetRPM
+                telemetryPayload.speed = remoteLastSpeed
+                telemetryPayload.gear = remoteTargetGear
+                telemetryPayload.throttle = lastRemoteInputs.t
+                telemetryPayload.steering = lastRemoteInputs.s
+                telemetryPayload.brake = lastRemoteInputs.b
+                
+                guihooks.trigger("lanMultiplayerRemoteTelemetry", telemetryPayload)
                 
                 -- Calculate and trigger Tandem Scorer Update
-                if remoteVehicleId and hasRemoteState then
-                    local pos = myVeh:getPosition()
-                    local dist = pos:distance(remoteTargetPos)
-                    local mySpeed = myVeh:getVelocity():length() * 3.6
-                    
-                    local myVel = myVeh:getVelocity()
-                    local myDir = myVeh:getDirectionVector()
-                    local myDriftAngle = 0
-                    if myVel:length() > 2.0 then
-                        local velDir = myVel:normalized()
-                        local cosAngle = myDir:dot(velDir)
-                        cosAngle = math.max(-1.0, math.min(1.0, cosAngle))
-                        myDriftAngle = math.acos(cosAngle) * 57.29577951
+                if remoteVeh and hasRemoteState then
+                    local pos = myVeh.getPosition and myVeh:getPosition()
+                    local myVel = myVeh.getVelocity and myVeh:getVelocity()
+                    if pos and myVel then
+                        local dx = pos.x - remoteTargetPos.x
+                        local dy = pos.y - remoteTargetPos.y
+                        local dz = pos.z - remoteTargetPos.z
+                        local dist = math.sqrt(dx*dx + dy*dy + dz*dz)
+                        local mySpeed = myVel:length() * 3.6
+                        
+                        local myRot = myVeh.getRotation and myVeh:getRotation()
+                        local myDriftAngle = 0
+                        if myRot and myVel:length() > 2.0 then
+                            local mx, my, mz, mw = myRot.x, myRot.y, myRot.z, myRot.w
+                            local myDirX = 2 * (mx * my + mz * mw)
+                            local myDirY = 1 - 2 * (mx * mx + mz * mz)
+                            local myDirZ = 2 * (my * mz - mx * mw)
+                            
+                            local velLen = myVel:length()
+                            local cosAngle = (myDirX * myVel.x + myDirY * myVel.y + myDirZ * myVel.z) / velLen
+                            cosAngle = math.max(-1.0, math.min(1.0, cosAngle))
+                            myDriftAngle = math.acos(cosAngle) * 57.29577951
+                        end
+                        
+                        local rx, ry, rz, rw = remoteTargetRot.x, remoteTargetRot.y, remoteTargetRot.z, remoteTargetRot.w
+                        local rDirX = 2 * (rx * ry + rz * rw)
+                        local rDirY = 1 - 2 * (rx * rx + rz * rz)
+                        local rDirZ = 2 * (ry * rz - rx * rw)
+                        
+                        local remoteDriftAngle = 0
+                        local remoteVelLen = remoteTargetVel:length()
+                        if remoteVelLen > 2.0 then
+                            local cosAngle = (rDirX * remoteTargetVel.x + rDirY * remoteTargetVel.y + rDirZ * remoteTargetVel.z) / remoteVelLen
+                            cosAngle = math.max(-1.0, math.min(1.0, cosAngle))
+                            remoteDriftAngle = math.acos(cosAngle) * 57.29577951
+                        end
+                        
+                        local angleDiff = math.abs(myDriftAngle - remoteDriftAngle)
+                        local speedDiff = math.abs(mySpeed - remoteLastSpeed)
+                        
+                        -- Scoring algorithm
+                        if dist < 15.0 and myDriftAngle > 10.0 and remoteDriftAngle > 10.0 and mySpeed > 10.0 then
+                            local proximityMult = math.max(1.0, 15.0 - dist)
+                            local angleMult = math.max(0.5, (90.0 - angleDiff) / 90.0)
+                            local pointsEarned = 10 * proximityMult * angleMult * 0.1 -- 10 Hz step
+                            M._tandemScore = (M._tandemScore or 0) + pointsEarned
+                        end
+                        
+                        tandemPayload.dist = dist
+                        tandemPayload.speedDiff = speedDiff
+                        tandemPayload.angleDiff = angleDiff
+                        tandemPayload.score = M._tandemScore or 0
+                        
+                        guihooks.trigger("lanMultiplayerTandemUpdate", tandemPayload)
                     end
-                    
-                    local remoteDir = remoteTargetRot * vec3(0, 1, 0)
-                    local remoteDriftAngle = 0
-                    if remoteTargetVel:length() > 2.0 then
-                        local velDir = remoteTargetVel:normalized()
-                        local cosAngle = remoteDir:dot(velDir)
-                        cosAngle = math.max(-1.0, math.min(1.0, cosAngle))
-                        remoteDriftAngle = math.acos(cosAngle) * 57.29577951
-                    end
-                    
-                    local angleDiff = math.abs(myDriftAngle - remoteDriftAngle)
-                    local speedDiff = math.abs(mySpeed - remoteLastSpeed)
-                    
-                    -- Scoring algorithm
-                    if dist < 15.0 and myDriftAngle > 10.0 and remoteDriftAngle > 10.0 and mySpeed > 10.0 then
-                        local proximityMult = math.max(1.0, 15.0 - dist)
-                        local angleMult = math.max(0.5, (90.0 - angleDiff) / 90.0)
-                        local pointsEarned = 10 * proximityMult * angleMult * 0.1 -- 10 Hz step
-                        M._tandemScore = (M._tandemScore or 0) + pointsEarned
-                    end
-                    
-                    guihooks.trigger("lanMultiplayerTandemUpdate", {
-                        dist = dist,
-                        speedDiff = speedDiff,
-                        angleDiff = angleDiff,
-                        score = M._tandemScore or 0
-                    })
                 end
             end
         end
@@ -2086,7 +2122,6 @@ local function onUpdate(dtReal, dtSim)
             damageCheckTimer = damageCheckTimer + dtReal
             if damageCheckTimer >= 1.0 then
                 damageCheckTimer = damageCheckTimer - 1.0
-                local myVeh = be:getPlayerVehicle(0)
                 if myVeh then
                     local checkCmd = [[
                     (function()
