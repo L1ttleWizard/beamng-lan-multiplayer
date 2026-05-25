@@ -148,6 +148,7 @@ local smoothThreshold = 0.02    -- meters: below this, just snap directly
 local prevFallbackSnapped = false
 local smoothedPos = vec3(0,0,0)
 local smoothedRot = quat(0,0,0,1)
+local smoothedStateInitialized = false
 
 local nickColor = ColorF(0.22, 0.74, 1.0, 1.0)
 local speedColor = ColorF(0.85, 0.85, 0.85, 0.75)
@@ -435,6 +436,7 @@ local function deleteRemoteVehicle()
         spawnPendingModel = nil
     end
     hasRemoteState = false
+    smoothedStateInitialized = false
     lastGhostState = false
     remoteTargetPos.x = 0
     remoteTargetPos.y = 0
@@ -1201,6 +1203,12 @@ local function applySmoothedRemoteState(dtReal)
     if not currentPos or not rawRot then return end
     local currentRot = quat(rawRot)
     
+    if not smoothedStateInitialized then
+        smoothedPos:set(currentPos)
+        smoothedRot:set(currentRot)
+        smoothedStateInitialized = true
+    end
+    
     local dx = plcPosX - currentPos.x
     local dy = plcPosY - currentPos.y
     local dz = plcPosZ - currentPos.z
@@ -1214,13 +1222,15 @@ local function applySmoothedRemoteState(dtReal)
     end
     
     if dist < smoothThreshold then
-        -- FIX: Snap both position AND rotation from target (not plc pos, which may drift)
+        -- Snap directly
+        smoothedPos:set(remoteTargetPos)
+        smoothedRot:set(remoteTargetRot)
+        
         local refNodeId = (not M.forceFallback) and remoteVeh.getRefNodeId and remoteVeh:getRefNodeId()
         if refNodeId and remoteVeh.getClusterRotationSlow and remoteVeh.setClusterPosRelRot and remoteVeh.applyClusterVelocityScaleAdd and remoteVeh.setOriginalTransform then
             local vehRot = quat(remoteVeh:getClusterRotationSlow(refNodeId))
             local targetRot = quat(remoteTargetRot.x, remoteTargetRot.y, remoteTargetRot.z, remoteTargetRot.w)
-            local targetJBeamRot = targetRot * quat(0, 0, 1, 0)
-            local diffRot = vehRot:inversed() * targetJBeamRot
+            local diffRot = vehRot:inversed() * targetRot
             remoteVeh:setClusterPosRelRot(refNodeId, remoteTargetPos.x, remoteTargetPos.y, remoteTargetPos.z, diffRot.x, diffRot.y, diffRot.z, diffRot.w)
             remoteVeh:applyClusterVelocityScaleAdd(refNodeId, 0, 0, 0, 0)
             remoteVeh:setOriginalTransform(remoteTargetPos.x, remoteTargetPos.y, remoteTargetPos.z, remoteTargetRot.x, remoteTargetRot.y, remoteTargetRot.z, remoteTargetRot.w)
@@ -1243,20 +1253,17 @@ local function applySmoothedRemoteState(dtReal)
     else
         local alpha = 1.0 - math.exp(-currentSmoothSpeed * dtReal)
         
-        -- Interpolate position toward PLC-extrapolated target
+        -- Interpolate position toward PLC-extrapolated target, starting from currentPos
         smoothedPos.x = currentPos.x + alpha * (plcPosX - currentPos.x)
         smoothedPos.y = currentPos.y + alpha * (plcPosY - currentPos.y)
         smoothedPos.z = currentPos.z + alpha * (plcPosZ - currentPos.z)
 
-        -- FIX: Interpolate rotation using nlerp (normalized linear interpolation)
-        -- This is what makes remoteTargetRot actually get applied smoothly.
-        -- Without this, rotation was always being set to the raw target, causing
-        -- jitter when PLC drifted position out of sync with rotation.
+        -- Interpolate rotation using nlerp, starting from last smoothedRot
         local oneMinusAlpha = 1.0 - alpha
-        local rx = oneMinusAlpha * currentRot.x + alpha * remoteTargetRot.x
-        local ry = oneMinusAlpha * currentRot.y + alpha * remoteTargetRot.y
-        local rz = oneMinusAlpha * currentRot.z + alpha * remoteTargetRot.z
-        local rw = oneMinusAlpha * currentRot.w + alpha * remoteTargetRot.w
+        local rx = oneMinusAlpha * smoothedRot.x + alpha * remoteTargetRot.x
+        local ry = oneMinusAlpha * smoothedRot.y + alpha * remoteTargetRot.y
+        local rz = oneMinusAlpha * smoothedRot.z + alpha * remoteTargetRot.z
+        local rw = oneMinusAlpha * smoothedRot.w + alpha * remoteTargetRot.w
         -- Normalize the quaternion to prevent scale drift
         local rLen = math.sqrt(rx*rx + ry*ry + rz*rz + rw*rw)
         if rLen > 0.0001 then
@@ -1276,8 +1283,7 @@ local function applySmoothedRemoteState(dtReal)
         if refNodeId and remoteVeh.getClusterRotationSlow and remoteVeh.setClusterPosRelRot and remoteVeh.applyClusterVelocityScaleAdd and remoteVeh.setOriginalTransform then
             local vehRot = quat(remoteVeh:getClusterRotationSlow(refNodeId))
             local targetRot = quat(smoothedRot.x, smoothedRot.y, smoothedRot.z, smoothedRot.w)
-            local targetJBeamRot = targetRot * quat(0, 0, 1, 0)
-            local diffRot = vehRot:inversed() * targetJBeamRot
+            local diffRot = vehRot:inversed() * targetRot
             remoteVeh:setClusterPosRelRot(refNodeId, smoothedPos.x, smoothedPos.y, smoothedPos.z, diffRot.x, diffRot.y, diffRot.z, diffRot.w)
             remoteVeh:applyClusterVelocityScaleAdd(refNodeId, 0, 0, 0, 0)
             remoteVeh:setOriginalTransform(smoothedPos.x, smoothedPos.y, smoothedPos.z, smoothedRot.x, smoothedRot.y, smoothedRot.z, smoothedRot.w)

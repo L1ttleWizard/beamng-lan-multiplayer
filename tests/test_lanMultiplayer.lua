@@ -727,6 +727,84 @@ tests.testPartConfigChangeSync = function()
     assertTrue(sentSpawn, "Spawn packet should be sent on part configuration change")
 end
 
+-- 20. JBeam Rotation Alignment Test
+tests.testJBeamRotationAlignment = function()
+    M.resetMetrics()
+    M.connect("127.0.0.1", 27015, 0)
+    M.setState("CONNECTED")
+    
+    local mockRemoteVehId = 7777
+    local remoteVeh = createMockVehicle(mockRemoteVehId, "covet", { parts = {} })
+    M.setRemoteVehicleId(mockRemoteVehId)
+    
+    -- Mock JBeam method suite
+    remoteVeh.getRefNodeId = function() return 1 end
+    remoteVeh.getClusterRotationSlow = function(self, refId)
+        return self.rotation.x, self.rotation.y, self.rotation.z, self.rotation.w
+    end
+    
+    local lastClusterPos = nil
+    local lastClusterRot = nil
+    remoteVeh.setClusterPosRelRot = function(self, refId, x, y, z, rx, ry, rz, rw)
+        lastClusterPos = vec3(x, y, z)
+        lastClusterRot = quat(rx, ry, rz, rw)
+        self.position = vec3(x, y, z)
+    end
+    
+    local lastOriginalPos = nil
+    local lastOriginalRot = nil
+    remoteVeh.setOriginalTransform = function(self, x, y, z, rx, ry, rz, rw)
+        lastOriginalPos = vec3(x, y, z)
+        lastOriginalRot = quat(rx, ry, rz, rw)
+        self.rotation = quat(rx, ry, rz, rw)
+    end
+    
+    remoteVeh.applyClusterVelocityScaleAdd = function(self, refId, vx, vy, vz, scale)
+        -- no-op
+    end
+    
+    -- Set target state (90 degrees around Z axis)
+    M.updateRemoteVehicle({
+        t = "u",
+        p = { 10.0, 20.0, 30.0 },
+        r = { 0.0, 0.0, 0.7071068, 0.7071068 },
+        v = { 0.0, 0.0, 0.0 },
+        a = { 0.0, 0.0, 0.0 },
+        i = { 0, 0, 0, 0, 0 }
+    })
+    
+    M.forceFallback = false
+    M.plcEnabled = false
+    
+    -- Frame 1: trigger update
+    M.applySmoothedRemoteState(0.1)
+    
+    assertNotNil(lastOriginalPos)
+    assertNotNil(lastOriginalRot)
+    assertNotNil(lastClusterPos)
+    assertNotNil(lastClusterRot)
+    
+    -- JBeam rotation should have started converging
+    assertTrue(lastOriginalRot.z > 0.0, "Should interpolate towards target rotation")
+    
+    -- Converge fully over multiple frames
+    for i = 1, 50 do
+        M.applySmoothedRemoteState(0.1)
+    end
+    
+    -- After convergence, original transform must match target rotation
+    assertNear(0.0, lastOriginalRot.x)
+    assertNear(0.0, lastOriginalRot.y)
+    assertNear(0.7071068, lastOriginalRot.z, 0.01)
+    assertNear(0.7071068, lastOriginalRot.w, 0.01)
+    
+    -- Relative rotation converges to identity
+    assertNear(0.0, lastClusterRot.x)
+    assertNear(0.0, lastClusterRot.y)
+    assertNear(0.0, lastClusterRot.z)
+    assertNear(1.0, lastClusterRot.w)
+end
+
 -- ============================================================================
 -- TEST RUNNER ENGINE
 -- ============================================================================
