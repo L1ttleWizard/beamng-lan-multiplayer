@@ -1211,9 +1211,19 @@ local function applySmoothedRemoteState(dtReal)
     
     if dist < smoothThreshold then
         -- FIX: Snap both position AND rotation from target (not plc pos, which may drift)
-        remoteVeh:setPosRot(
-            remoteTargetPos.x, remoteTargetPos.y, remoteTargetPos.z,
-            remoteTargetRot.x, remoteTargetRot.y, remoteTargetRot.z, remoteTargetRot.w)
+        local refNodeId = remoteVeh.getRefNodeId and remoteVeh:getRefNodeId()
+        if refNodeId and remoteVeh.getClusterRotationSlow and remoteVeh.setClusterPosRelRot and remoteVeh.applyClusterVelocityScaleAdd and remoteVeh.setOriginalTransform then
+            local vehRot = quat(remoteVeh:getClusterRotationSlow(refNodeId))
+            local targetRot = quat(remoteTargetRot.x, remoteTargetRot.y, remoteTargetRot.z, remoteTargetRot.w)
+            local diffRot = vehRot:inversed() * targetRot
+            remoteVeh:setClusterPosRelRot(refNodeId, remoteTargetPos.x, remoteTargetPos.y, remoteTargetPos.z, diffRot.x, diffRot.y, diffRot.z, diffRot.w)
+            remoteVeh:applyClusterVelocityScaleAdd(refNodeId, 0, 0, 0, 0)
+            remoteVeh:setOriginalTransform(remoteTargetPos.x, remoteTargetPos.y, remoteTargetPos.z, remoteTargetRot.x, remoteTargetRot.y, remoteTargetRot.z, remoteTargetRot.w)
+        else
+            remoteVeh:setPosRot(
+                remoteTargetPos.x, remoteTargetPos.y, remoteTargetPos.z,
+                remoteTargetRot.x, remoteTargetRot.y, remoteTargetRot.z, remoteTargetRot.w)
+        end
     else
         local alpha = 1.0 - math.exp(-currentSmoothSpeed * dtReal)
         
@@ -1246,9 +1256,19 @@ local function applySmoothedRemoteState(dtReal)
             smoothedRot.w = remoteTargetRot.w
         end
         
-        remoteVeh:setPosRot(
-            smoothedPos.x, smoothedPos.y, smoothedPos.z,
-            smoothedRot.x, smoothedRot.y, smoothedRot.z, smoothedRot.w)
+        local refNodeId = remoteVeh.getRefNodeId and remoteVeh:getRefNodeId()
+        if refNodeId and remoteVeh.getClusterRotationSlow and remoteVeh.setClusterPosRelRot and remoteVeh.applyClusterVelocityScaleAdd and remoteVeh.setOriginalTransform then
+            local vehRot = quat(remoteVeh:getClusterRotationSlow(refNodeId))
+            local targetRot = quat(smoothedRot.x, smoothedRot.y, smoothedRot.z, smoothedRot.w)
+            local diffRot = vehRot:inversed() * targetRot
+            remoteVeh:setClusterPosRelRot(refNodeId, smoothedPos.x, smoothedPos.y, smoothedPos.z, diffRot.x, diffRot.y, diffRot.z, diffRot.w)
+            remoteVeh:applyClusterVelocityScaleAdd(refNodeId, 0, 0, 0, 0)
+            remoteVeh:setOriginalTransform(smoothedPos.x, smoothedPos.y, smoothedPos.z, smoothedRot.x, smoothedRot.y, smoothedRot.z, smoothedRot.w)
+        else
+            remoteVeh:setPosRot(
+                smoothedPos.x, smoothedPos.y, smoothedPos.z,
+                smoothedRot.x, smoothedRot.y, smoothedRot.z, smoothedRot.w)
+        end
     end
     
     if remoteVeh.setVelocity and remoteTargetVel then

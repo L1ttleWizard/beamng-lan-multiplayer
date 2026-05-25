@@ -551,16 +551,15 @@ tests.testPLCToggle = function()
     
     -- 1. Test with PLC enabled (should extrapolate target position)
     M.plcEnabled = true
+    remoteVeh.position = vec3(0, 0, 0)
     M.applySmoothedRemoteState(0.1)
-    assertEqual(10.5, M.getRemoteTargetPos().x, "Target pos should extrapolate by velocity * dt when PLC is enabled")
-    
-    -- Reset target pos
-    M.getRemoteTargetPos().x = 10
+    assertNear(9.9772, remoteVeh.position.x, 0.01, "Vehicle pos should converge towards the extrapolated position 10.5")
     
     -- 2. Test with PLC disabled (should NOT extrapolate)
     M.plcEnabled = false
+    remoteVeh.position = vec3(0, 0, 0)
     M.applySmoothedRemoteState(0.1)
-    assertEqual(10.0, M.getRemoteTargetPos().x, "Target pos should remain frozen when PLC is disabled")
+    assertNear(9.5021, remoteVeh.position.x, 0.01, "Vehicle pos should converge towards the non-extrapolated position 10.0")
 end
 
 -- 16. Tandem Scorer Test

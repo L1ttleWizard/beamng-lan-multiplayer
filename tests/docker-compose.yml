@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  load_tester:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # Allows containers to connect to the host machine using 'host.docker.internal'
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # Command arguments can be customized here or overridden at runtime
+    command: ["--ip", "host.docker.internal", "--port", "27015", "--rate", "60"]
+    # Restart policy
+    restart: unless-stopped
