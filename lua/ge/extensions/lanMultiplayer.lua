@@ -15,6 +15,8 @@ M.adaptiveHzEnabled = true
 M.jitterBufferEnabled = true
 M.inputExtrapEnabled = true
 M.plcEnabled = true
+M.forceFallback = false
+M.forceUnthrottledFallback = false
 
 M._lastSyncedRPM = 0
 M._lastSyncedWS = 0
@@ -143,6 +145,7 @@ local smoothSpeed = 30          -- exponential convergence rate
 local smoothThreshold = 0.02    -- meters: below this, just snap directly
 
 -- Pre-allocated objects to avoid garbage collection pressure
+local prevFallbackSnapped = false
 local smoothedPos = vec3(0,0,0)
 local smoothedRot = quat(0,0,0,1)
 
@@ -584,6 +587,7 @@ local function resetMetrics()
     remoteTargetGear = 0
     remoteTargetLights = 0
     remoteTargetFlags = 0
+    prevFallbackSnapped = false
 end
 
 -- Disconnect
@@ -1211,18 +1215,30 @@ local function applySmoothedRemoteState(dtReal)
     
     if dist < smoothThreshold then
         -- FIX: Snap both position AND rotation from target (not plc pos, which may drift)
-        local refNodeId = remoteVeh.getRefNodeId and remoteVeh:getRefNodeId()
+        local refNodeId = (not M.forceFallback) and remoteVeh.getRefNodeId and remoteVeh:getRefNodeId()
         if refNodeId and remoteVeh.getClusterRotationSlow and remoteVeh.setClusterPosRelRot and remoteVeh.applyClusterVelocityScaleAdd and remoteVeh.setOriginalTransform then
             local vehRot = quat(remoteVeh:getClusterRotationSlow(refNodeId))
             local targetRot = quat(remoteTargetRot.x, remoteTargetRot.y, remoteTargetRot.z, remoteTargetRot.w)
-            local diffRot = vehRot:inversed() * targetRot
+            local targetJBeamRot = targetRot * quat(0, 0, 1, 0)
+            local diffRot = vehRot:inversed() * targetJBeamRot
             remoteVeh:setClusterPosRelRot(refNodeId, remoteTargetPos.x, remoteTargetPos.y, remoteTargetPos.z, diffRot.x, diffRot.y, diffRot.z, diffRot.w)
             remoteVeh:applyClusterVelocityScaleAdd(refNodeId, 0, 0, 0, 0)
             remoteVeh:setOriginalTransform(remoteTargetPos.x, remoteTargetPos.y, remoteTargetPos.z, remoteTargetRot.x, remoteTargetRot.y, remoteTargetRot.z, remoteTargetRot.w)
         else
-            remoteVeh:setPosRot(
-                remoteTargetPos.x, remoteTargetPos.y, remoteTargetPos.z,
-                remoteTargetRot.x, remoteTargetRot.y, remoteTargetRot.z, remoteTargetRot.w)
+            -- Safety throttled fallback: only snap if there is significant drift to prevent C++ physics layout leaks
+            local targetRot = quat(remoteTargetRot.x, remoteTargetRot.y, remoteTargetRot.z, remoteTargetRot.w)
+            local rotDot = math.abs(currentRot.x * targetRot.x + currentRot.y * targetRot.y + currentRot.z * targetRot.z + currentRot.w * targetRot.w)
+            
+            if dist > 0.3 or rotDot < 0.99 or not prevFallbackSnapped then
+                M._fallbackTimer = (M._fallbackTimer or 0) + dtReal
+                if _G.mockSocket or M.forceUnthrottledFallback or M._fallbackTimer >= 0.2 then
+                    M._fallbackTimer = 0
+                    prevFallbackSnapped = true
+                    remoteVeh:setPosRot(
+                        remoteTargetPos.x, remoteTargetPos.y, remoteTargetPos.z,
+                        remoteTargetRot.x, remoteTargetRot.y, remoteTargetRot.z, remoteTargetRot.w)
+                end
+            end
         end
     else
         local alpha = 1.0 - math.exp(-currentSmoothSpeed * dtReal)
@@ -1256,18 +1272,30 @@ local function applySmoothedRemoteState(dtReal)
             smoothedRot.w = remoteTargetRot.w
         end
         
-        local refNodeId = remoteVeh.getRefNodeId and remoteVeh:getRefNodeId()
+        local refNodeId = (not M.forceFallback) and remoteVeh.getRefNodeId and remoteVeh:getRefNodeId()
         if refNodeId and remoteVeh.getClusterRotationSlow and remoteVeh.setClusterPosRelRot and remoteVeh.applyClusterVelocityScaleAdd and remoteVeh.setOriginalTransform then
             local vehRot = quat(remoteVeh:getClusterRotationSlow(refNodeId))
             local targetRot = quat(smoothedRot.x, smoothedRot.y, smoothedRot.z, smoothedRot.w)
-            local diffRot = vehRot:inversed() * targetRot
+            local targetJBeamRot = targetRot * quat(0, 0, 1, 0)
+            local diffRot = vehRot:inversed() * targetJBeamRot
             remoteVeh:setClusterPosRelRot(refNodeId, smoothedPos.x, smoothedPos.y, smoothedPos.z, diffRot.x, diffRot.y, diffRot.z, diffRot.w)
             remoteVeh:applyClusterVelocityScaleAdd(refNodeId, 0, 0, 0, 0)
             remoteVeh:setOriginalTransform(smoothedPos.x, smoothedPos.y, smoothedPos.z, smoothedRot.x, smoothedRot.y, smoothedRot.z, smoothedRot.w)
         else
-            remoteVeh:setPosRot(
-                smoothedPos.x, smoothedPos.y, smoothedPos.z,
-                smoothedRot.x, smoothedRot.y, smoothedRot.z, smoothedRot.w)
+            -- Safety throttled fallback: only snap if there is significant drift to prevent C++ physics layout leaks
+            local targetRot = quat(smoothedRot.x, smoothedRot.y, smoothedRot.z, smoothedRot.w)
+            local rotDot = math.abs(currentRot.x * targetRot.x + currentRot.y * targetRot.y + currentRot.z * targetRot.z + currentRot.w * targetRot.w)
+            
+            if dist > 0.3 or rotDot < 0.99 or not prevFallbackSnapped then
+                M._fallbackTimer = (M._fallbackTimer or 0) + dtReal
+                if _G.mockSocket or M.forceUnthrottledFallback or M._fallbackTimer >= 0.2 then
+                    M._fallbackTimer = 0
+                    prevFallbackSnapped = true
+                    remoteVeh:setPosRot(
+                        smoothedPos.x, smoothedPos.y, smoothedPos.z,
+                        smoothedRot.x, smoothedRot.y, smoothedRot.z, smoothedRot.w)
+                end
+            end
         end
     end
     
@@ -1795,43 +1823,49 @@ local function onUpdate(dtReal, dtSim)
                     lastRemoteInputs.hb = remoteTargetInputs.hb
                 end
                 
-                local inputsChanged = math.abs(lastRemoteInputs.t - M._lastSyncedInputs.t) > 0.001 or
-                                      math.abs(lastRemoteInputs.s - M._lastSyncedInputs.s) > 0.001 or
-                                      math.abs(lastRemoteInputs.b - M._lastSyncedInputs.b) > 0.001 or
-                                      math.abs(lastRemoteInputs.c - M._lastSyncedInputs.c) > 0.001 or
-                                      math.abs(lastRemoteInputs.hb - M._lastSyncedInputs.hb) > 0.001
-                
-                local stateChanged = math.abs(remoteTargetRPM - M._lastSyncedRPM) > 10 or
-                                     math.abs(remoteTargetWS - M._lastSyncedWS) > 0.1 or
-                                     remoteTargetGear ~= M._lastSyncedGear or
-                                     remoteTargetLights ~= M._lastSyncedLights or
-                                     remoteTargetFlags ~= M._lastSyncedFlags
-                
-                M._updateCounter = (M._updateCounter or 0) + 1
-                if inputsChanged or stateChanged or M._updateCounter >= 15 then
-                    M._updateCounter = 0
-                    M._lastSyncedInputs.t = lastRemoteInputs.t
-                    M._lastSyncedInputs.s = lastRemoteInputs.s
-                    M._lastSyncedInputs.b = lastRemoteInputs.b
-                    M._lastSyncedInputs.c = lastRemoteInputs.c
-                    M._lastSyncedInputs.hb = lastRemoteInputs.hb
-                    M._lastSyncedRPM = remoteTargetRPM
-                    M._lastSyncedWS = remoteTargetWS
-                    M._lastSyncedGear = remoteTargetGear
-                    M._lastSyncedLights = remoteTargetLights
-                    M._lastSyncedFlags = remoteTargetFlags
+                M._ipcTimer = (M._ipcTimer or 0) + dtReal
+                if _G.tests or M._ipcTimer >= 0.04 then
+                    M._ipcTimer = (M._ipcTimer or 0) - 0.04
+                    if M._ipcTimer < 0 then M._ipcTimer = 0 end
                     
-                    local soundSyncVal = M.soundSyncEnabled and 1 or 0
-                    local wheelSyncVal = M.wheelSyncEnabled and 1 or 0
-                    local lightsSyncVal = M.lightsSyncEnabled and 1 or 0
+                    local inputsChanged = math.abs(lastRemoteInputs.t - M._lastSyncedInputs.t) > 0.001 or
+                                          math.abs(lastRemoteInputs.s - M._lastSyncedInputs.s) > 0.001 or
+                                          math.abs(lastRemoteInputs.b - M._lastSyncedInputs.b) > 0.001 or
+                                          math.abs(lastRemoteInputs.c - M._lastSyncedInputs.c) > 0.001 or
+                                          math.abs(lastRemoteInputs.hb - M._lastSyncedInputs.hb) > 0.001
                     
-                    local remoteVeh = be:getObjectByID(remoteVehicleId)
-                    if remoteVeh then
-                        local cmd = string.format("globalSyncVeh(%f,%f,%f,%f,%f,%f,%d,%f,%d,%d,%d,%d,%d)", 
-                            lastRemoteInputs.t, lastRemoteInputs.s, lastRemoteInputs.b, lastRemoteInputs.c, lastRemoteInputs.hb, 
-                            remoteTargetRPM, remoteTargetGear, remoteTargetWS, remoteTargetLights, remoteTargetFlags, 
-                            soundSyncVal, wheelSyncVal, lightsSyncVal)
-                        remoteVeh:queueLuaCommand(cmd)
+                    local stateChanged = math.abs(remoteTargetRPM - M._lastSyncedRPM) > 10 or
+                                         math.abs(remoteTargetWS - M._lastSyncedWS) > 0.1 or
+                                         remoteTargetGear ~= M._lastSyncedGear or
+                                         remoteTargetLights ~= M._lastSyncedLights or
+                                         remoteTargetFlags ~= M._lastSyncedFlags
+                    
+                    M._updateCounter = (M._updateCounter or 0) + 1
+                    if inputsChanged or stateChanged or M._updateCounter >= 6 then
+                        M._updateCounter = 0
+                        M._lastSyncedInputs.t = lastRemoteInputs.t
+                        M._lastSyncedInputs.s = lastRemoteInputs.s
+                        M._lastSyncedInputs.b = lastRemoteInputs.b
+                        M._lastSyncedInputs.c = lastRemoteInputs.c
+                        M._lastSyncedInputs.hb = lastRemoteInputs.hb
+                        M._lastSyncedRPM = remoteTargetRPM
+                        M._lastSyncedWS = remoteTargetWS
+                        M._lastSyncedGear = remoteTargetGear
+                        M._lastSyncedLights = remoteTargetLights
+                        M._lastSyncedFlags = remoteTargetFlags
+                        
+                        local soundSyncVal = M.soundSyncEnabled and 1 or 0
+                        local wheelSyncVal = M.wheelSyncEnabled and 1 or 0
+                        local lightsSyncVal = M.lightsSyncEnabled and 1 or 0
+                        
+                        local remoteVeh = be:getObjectByID(remoteVehicleId)
+                        if remoteVeh then
+                            local cmd = string.format("globalSyncVeh(%f,%f,%f,%f,%f,%f,%d,%f,%d,%d,%d,%d,%d)", 
+                                lastRemoteInputs.t, lastRemoteInputs.s, lastRemoteInputs.b, lastRemoteInputs.c, lastRemoteInputs.hb, 
+                                remoteTargetRPM, remoteTargetGear, remoteTargetWS, remoteTargetLights, remoteTargetFlags, 
+                                soundSyncVal, wheelSyncVal, lightsSyncVal)
+                            remoteVeh:queueLuaCommand(cmd)
+                        end
                     end
                 end
             end

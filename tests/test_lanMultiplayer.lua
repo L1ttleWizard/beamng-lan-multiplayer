@@ -61,7 +61,7 @@ end
 -- TESTS
 -- ============================================================================
 
-local tests = {}
+tests = {}
 
 -- 1. Configuration Minimizer Test
 tests.testGetMinimizedConfig = function()

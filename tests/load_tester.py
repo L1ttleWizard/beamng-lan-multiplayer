@@ -16,6 +16,8 @@ def main():
     parser.add_argument("--radius", type=float, default=20.0, help="Trajectory circle radius")
     parser.add_argument("--speed", type=float, default=15.0, help="Simulated speed (m/s)")
     parser.add_argument("--center", type=str, default=None, help="Manual center position as 'x,y,z'")
+    parser.add_argument("--no-handshake", action="store_true", help="Skip sending connection handshake and start telemetry stream directly")
+    parser.add_argument("--json", action="store_true", help="Transmit circular telemetry encoded as JSON string packets instead of binary")
     args = parser.parse_args()
 
     client_id = random.randint(1000, 9999)
@@ -46,40 +48,50 @@ def main():
         except Exception as e:
             print(f"[{nickname}] Failed to parse manual center '{args.center}': {e}. Using automatic discovery.")
 
-    # 1. Send connection handshake
-    handshake = {
-        "type": "connect",
-        "nickname": nickname,
-        "model": "covet",
-        "config": {"parts": {}, "vars": {}},
-        "pos": {"x": center_x, "y": center_y, "z": center_z},
-        "rot": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}
-    }
-    
-    print(f"[{nickname}] Sending handshake to {args.ip}:{args.port}...")
-    sock.sendto(json.dumps(handshake).encode('utf-8'), server_addr)
-
-    # If manual center not provided, listen for connect_ack to discover host position
-    if not args.center:
-        print(f"[{nickname}] Waiting for connect_ack from server to center trajectory...")
-        sock.settimeout(2.0)
-        try:
-            data, addr = sock.recvfrom(4096)
-            response = json.loads(data.decode('utf-8'))
-            if response.get("type") == "connect_ack" and "pos" in response:
-                pos = response["pos"]
-                center_x = float(pos.get("x", 0.0))
-                center_y = float(pos.get("y", 0.0))
-                center_z = float(pos.get("z", 0.0))
-                print(f"[{nickname}] Discovered host position: ({center_x}, {center_y}, {center_z})")
-            else:
-                print(f"[{nickname}] Received invalid response or missing position. Spawning at default (0, 0, 0).")
-        except socket.timeout:
-            print(f"[{nickname}] Timed out waiting for connect_ack. Spawning at default (0, 0, 0).")
-        except Exception as e:
-            print(f"[{nickname}] Error receiving connect_ack: {e}. Spawning at default (0, 0, 0).")
-        finally:
-            sock.settimeout(None)
+    if not args.no_handshake:
+        # 1. Send connection handshake
+        handshake = {
+            "type": "connect",
+            "nickname": nickname,
+            "model": "covet",
+            "config": {"parts": {}, "vars": {}},
+            "pos": {"x": center_x, "y": center_y, "z": center_z},
+            "rot": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}
+        }
+        
+        # Send connection handshake with retries
+        connected = False
+        sock.settimeout(0.5)
+        max_retries = 30
+        
+        print(f"[{nickname}] Connecting to {args.ip}:{args.port}...")
+        for attempt in range(max_retries):
+            try:
+                sock.sendto(json.dumps(handshake).encode('utf-8'), server_addr)
+                
+                # If manual center not provided, discover it from connect_ack
+                data, addr = sock.recvfrom(4096)
+                response = json.loads(data.decode('utf-8'))
+                if response.get("type") == "connect_ack":
+                    if not args.center and "pos" in response:
+                        pos = response["pos"]
+                        center_x = float(pos.get("x", 0.0))
+                        center_y = float(pos.get("y", 0.0))
+                        center_z = float(pos.get("z", 0.0))
+                    print(f"[{nickname}] Connected! Discovered host position: ({center_x}, {center_y}, {center_z})")
+                    connected = True
+                    break
+            except socket.timeout:
+                continue
+            except Exception as e:
+                # Under Windows, WinError 10054 happens if port is not yet open
+                time.sleep(0.5)
+                continue
+                
+        if not connected:
+            print(f"[{nickname}] Failed to receive connect_ack. Starting telemetry stream anyway.")
+        
+        sock.settimeout(None)
 
     # 2. Main loop: Send binary DPUB packets simulating a circular driving path
     seq = 0
@@ -130,18 +142,36 @@ def main():
             lights = 1 # low beams
             flags = 0 # standard
             
-            # Pack binary packet
-            packet_data = struct.pack(
-                pack_format,
-                magic, seq,
-                px, py, pz,
-                rx, ry, rz, rw,
-                vx, vy, vz,
-                ax, ay, az,
-                throttle, steering, brake, clutch, handbrake,
-                rpm, wheel_speed,
-                gear, lights, flags
-            )
+            if args.json:
+                # Pack JSON packet matching short format 't' == 'u'
+                payload = {
+                    "t": "u",
+                    "s": seq,
+                    "p": [px, py, pz],
+                    "r": [rx, ry, rz, rw],
+                    "v": [vx, vy, vz],
+                    "a": [ax, ay, az],
+                    "i": [throttle, steering, brake, clutch, handbrake],
+                    "rpm": rpm,
+                    "wheelSpeed": wheel_speed,
+                    "gear": gear,
+                    "lights": lights,
+                    "flags": flags
+                }
+                packet_data = json.dumps(payload).encode('utf-8')
+            else:
+                # Pack binary packet
+                packet_data = struct.pack(
+                    pack_format,
+                    magic, seq,
+                    px, py, pz,
+                    rx, ry, rz, rw,
+                    vx, vy, vz,
+                    ax, ay, az,
+                    throttle, steering, brake, clutch, handbrake,
+                    rpm, wheel_speed,
+                    gear, lights, flags
+                )
             
             sock.sendto(packet_data, server_addr)
             seq += 1
