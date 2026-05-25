@@ -117,7 +117,7 @@ def main():
             pz = center_z + 0.5 # slightly above center_z
             
             # Face the direction of velocity (tangent to circle)
-            yaw = angle + math.pi / 2
+            yaw = angle
             # Quaternion from yaw (Z axis rotation)
             rx = 0.0
             ry = 0.0
