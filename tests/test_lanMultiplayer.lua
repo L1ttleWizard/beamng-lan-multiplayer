@@ -24,6 +24,20 @@ local function assertTrue(condition, msg)
     end
 end
 
+local function quatDot(a, b)
+    return math.abs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w)
+end
+
+local function assertQuatSameOrientation(expected, actual, msg)
+    local dot = quatDot(expected, actual)
+    if dot < 0.99 then
+        error(string.format(
+            "Assertion failed: quaternions differ (dot=%f, need >= 0.99). expected (%f,%f,%f,%f) actual (%f,%f,%f,%f). %s",
+            dot, expected.x, expected.y, expected.z, expected.w,
+            actual.x, actual.y, actual.z, actual.w, msg or ""), 2)
+    end
+end
+
 local function assertFalse(condition, msg)
     if condition then
         error(string.format("Assertion failed: expected false, got true. %s", msg or ""), 2)
@@ -53,7 +67,21 @@ local function setup()
     
     -- Load clean extension
     package.loaded["lua/ge/extensions/lanMultiplayer"] = nil
+    package.loaded["lua/ge/extensions/worldSync"] = nil
+    package.loaded["lua/ge/extensions/gameplaySync"] = nil
+    package.loaded["lua/ge/extensions/aiTrafficSync"] = nil
     M = require("lua/ge/extensions/lanMultiplayer")
+    extensions = extensions or {}
+    extensions.load = function(name)
+        if name == "worldSync" then
+            extensions.worldSync = require("lua/ge/extensions/worldSync")
+        elseif name == "gameplaySync" then
+            extensions.gameplaySync = require("lua/ge/extensions/gameplaySync")
+        elseif name == "aiTrafficSync" then
+            extensions.aiTrafficSync = require("lua/ge/extensions/aiTrafficSync")
+        end
+    end
+    extensions.lanMultiplayer = M
     M.onExtensionLoaded()
 end
 
@@ -262,10 +290,9 @@ tests.testFFIBinarySerialization = function()
     assertNear(300.2, targetPos.z)
     
     assertNotNil(targetRot)
-    assertNear(0.1, targetRot.x)
-    assertNear(0.2, targetRot.y)
-    assertNear(0.3, targetRot.z)
-    assertNear(0.9, targetRot.w)
+    -- Same encoding as sendUpdate: quatFromDir(-direction, up), not raw getRotation()
+    local expectedRot = quatFromDir(-myVeh:getDirectionVector(), myVeh:getDirectionVectorUp())
+    assertQuatSameOrientation(expectedRot, targetRot, "FFI rotation must match direction-vector encoding")
     
     assertNotNil(targetVel)
     assertNear(5.5, targetVel.x)
@@ -750,6 +777,10 @@ tests.testJBeamRotationAlignment = function()
         lastClusterRot = quat(rx, ry, rz, rw)
         self.position = vec3(x, y, z)
     end
+    remoteVeh.setPositionNoPhysicsReset = function(self, pos)
+        lastClusterPos = vec3(pos)
+        self.position = vec3(pos)
+    end
     
     local lastOriginalPos = nil
     local lastOriginalRot = nil
@@ -757,6 +788,7 @@ tests.testJBeamRotationAlignment = function()
         lastOriginalPos = vec3(x, y, z)
         lastOriginalRot = quat(rx, ry, rz, rw)
         self.rotation = quat(rx, ry, rz, rw)
+        lastClusterRot = quat(rx, ry, rz, rw)
     end
     
     remoteVeh.applyClusterVelocityScaleAdd = function(self, refId, vx, vy, vz, scale)
@@ -798,11 +830,275 @@ tests.testJBeamRotationAlignment = function()
     assertNear(0.7071068, lastOriginalRot.z, 0.01)
     assertNear(0.7071068, lastOriginalRot.w, 0.01)
     
-    -- Relative rotation converges to identity
+    -- Relative rotation converges to target rotation (since spawn rotation is identity)
     assertNear(0.0, lastClusterRot.x)
     assertNear(0.0, lastClusterRot.y)
-    assertNear(0.0, lastClusterRot.z)
-    assertNear(1.0, lastClusterRot.w)
+    assertNear(0.7071068, lastClusterRot.z, 0.01)
+    assertNear(0.7071068, lastClusterRot.w, 0.01)
+end
+
+-- 21. Reliable UDP Transmission & ACK logic
+tests.testReliableUDP = function()
+    -- Initialize states
+    M.setState("CONNECTED")
+    M.setRole("CLIENT")
+    M.resetMetrics()
+    
+    -- Send chat message which triggers sendPacketReliable
+    M.chatMessage("Hello peer!")
+    
+    -- Check that seq increments to 1, and pending table has 1 item
+    assertEqual(1, M._reliableSeq)
+    local pending = M._pendingReliablePackets
+    local count = 0
+    local pkt = nil
+    for id, p in pairs(pending) do
+        count = count + 1
+        pkt = p
+    end
+    assertEqual(1, count)
+    assertNotNil(pkt)
+    assertEqual(0, pkt.data.msg_id)
+    assertEqual("chat", pkt.data.type)
+    assertEqual(0, pkt.retries)
+    
+    -- Processing an ACK packet should clear the queue
+    local ackPacket = '{"type":"ack","msg_id":0}'
+    M.processPacket(ackPacket, "127.0.0.1", 27015)
+    
+    count = 0
+    for id, p in pairs(pending) do
+        count = count + 1
+    end
+    assertEqual(0, count)
+    
+    -- Send another packet to test retry timeouts and disconnects
+    M.chatMessage("Goodbye!")
+    
+    -- Advance clock and trigger updates to simulate packet loss and retry limit
+    local fakeClock = os.clock()
+    local originalClock = os.clock
+    os.clock = function() return fakeClock end
+    
+    for i = 1, 11 do
+        fakeClock = fakeClock + 0.25
+        M.onUpdate(0.25, 0.25)
+    end
+    
+    os.clock = originalClock
+    
+    -- After 10 failed retries, it must disconnect and clear metrics
+    assertEqual("IDLE", guihooks.triggered["lanMultiplayerStatus"].status)
+    assertEqual("NONE", guihooks.triggered["lanMultiplayerStatus"].role)
+end
+
+-- 22. Spawn / Despawn Lifecycle Culling and Mapping
+tests.testSpawnDespawnLifecycle = function()
+    M.setState("CONNECTED")
+    M.setRole("CLIENT")
+    M.resetMetrics()
+    M.setStrictLifecycle(true)
+    
+    -- Temporarily override spawnNewVehicle to prevent auto-calling onVehicleSpawned
+    local originalSpawnNew = core_vehicles.spawnNewVehicle
+    core_vehicles.spawnNewVehicle = function(model, options)
+        table.insert(core_vehicles.spawned, { model = model, options = options })
+    end
+    
+    -- Trigger spawn request using real JSON packet flow
+    M.processPacket('{"type":"spawn","model":"covet","vehicle_id":7777}', "127.0.0.1", 27015)
+    
+    -- Restore original spawnNewVehicle function
+    core_vehicles.spawnNewVehicle = originalSpawnNew
+    
+    -- 1. Attempt to spawn wrong model (hijacking attempt by local traffic)
+    local mockHijackerId = 1111
+    createMockVehicle(mockHijackerId, "pigeon", nil)
+    M.onVehicleSpawned(mockHijackerId)
+    
+    -- Should be ignored: remote vehicle ID remains nil
+    assertNil(M.getRemoteVehicleId())
+    
+    -- 2. Attempt to spawn correct model but outside the time window
+    M._expectedSpawnTime = os.clock() - 6.0
+    local mockExpiredId = 2222
+    createMockVehicle(mockExpiredId, "covet", nil)
+    M.onVehicleSpawned(mockExpiredId)
+    
+    -- Should be ignored: remote vehicle ID remains nil
+    assertNil(M.getRemoteVehicleId())
+    
+    -- 3. Correct spawn (valid model and within time window)
+    M._expectedSpawnTime = os.clock()
+    local mockSuccessId = 3333
+    createMockVehicle(mockSuccessId, "covet", nil)
+    M.onVehicleSpawned(mockSuccessId)
+    
+    -- Should succeed: remote vehicle ID assigned, mapping registered
+    assertEqual(mockSuccessId, M.getRemoteVehicleId())
+    assertEqual(mockSuccessId, M._peerToLocalVehicles[7777])
+    
+    -- 4. Receive despawn command for peer ID 7777
+    local despawnPacket = '{"type":"despawn","vehicle_id":7777}'
+    M.processPacket(despawnPacket, "127.0.0.1", 27015)
+    
+    -- Should trigger deletion: local vehicle ID 3333 removed from objects, mapping cleared
+    assertNil(be:getObjectByID(mockSuccessId))
+    assertNil(M.getRemoteVehicleId())
+    assertNil(M._peerToLocalVehicles[7777])
+end
+
+-- 23. World weather sync respects client toggle
+tests.testWorldWeatherSyncToggle = function()
+    local worldSync = extensions.worldSync
+    assertNotNil(worldSync)
+
+    local applied = false
+    extensions.core_environment = {
+        getTimeOfDay = function() return { time = 0.5, play = true } end,
+        setTimeOfDay = function() applied = true end,
+        getFogDensity = function() return 0.1 end,
+        setFogDensity = function() applied = true end,
+        getWindSpeed = function() return 3 end,
+        setWindSpeed = function() applied = true end,
+    }
+
+    M.setState("CONNECTED")
+    M.setRole("CLIENT")
+    M.setWorldWeatherSync(false)
+
+    worldSync.processPacket({ type = "world_env", time = 0.25, fogDensity = 500, windSpeed = 5 })
+    assertFalse(applied, "weather must not apply when toggle is off")
+
+    M.setWorldWeatherSync(true)
+    worldSync.processPacket({ type = "world_env", time = 0.25, fogDensity = 500, windSpeed = 5 })
+    assertTrue(applied, "weather must apply when toggle is on")
+end
+
+-- 24. Checkpoint packets trigger UI when enabled
+tests.testCheckpointUiToggle = function()
+    local gameplaySync = extensions.gameplaySync
+    assertNotNil(gameplaySync)
+
+    M.setState("CONNECTED")
+    M.setRole("CLIENT")
+    M.setCheckpointsUi(true)
+    guihooks:reset()
+
+    gameplaySync.processPacket({
+        type = "checkpoint",
+        trigger = "finish_line",
+        nickname = "Host",
+        elapsed = 42.5
+    })
+
+    assertNotNil(guihooks.triggered["lanMultiplayerCheckpoint"])
+    assertEqual("finish_line", guihooks.triggered["lanMultiplayerCheckpoint"].latest.trigger)
+    assertNear(42.5, guihooks.triggered["lanMultiplayerCheckpoint"].latest.elapsed, 0.01)
+end
+
+-- 25. AI snapshot FFI size
+tests.testAiSnapshotSize = function()
+    local aiSync = extensions.aiTrafficSync
+    assertNotNil(aiSync)
+    assertEqual(30, aiSync.getSnapshotSize())
+end
+
+-- 26. Quaternion compression roundtrip
+tests.testAiQuatCompressRoundtrip = function()
+    local aiSync = extensions.aiTrafficSync
+    local cases = {
+        { 0, 0, 0, 1 },
+        { 0.707, 0, 0, 0.707 },
+        { 0.1, 0.2, 0.3, 0.9 },
+    }
+    for _, c in ipairs(cases) do
+        local qx, qy, qz, qw = c[1], c[2], c[3], c[4]
+        local len = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+        qx, qy, qz, qw = qx / len, qy / len, qz / len, qw / len
+        local li, c0, c1, c2 = aiSync.compressQuat(qx, qy, qz, qw)
+        local rx, ry, rz, rw = aiSync.decompressQuat(li, c0, c1, c2)
+        assertQuatSameOrientation({ x = qx, y = qy, z = qz, w = qw }, { x = rx, y = ry, z = rz, w = rw }, "quat roundtrip")
+    end
+end
+
+-- 27. AI LOD zones
+tests.testAiLodZone = function()
+    local aiSync = extensions.aiTrafficSync
+    assertEqual("A", aiSync.getLodZone(50))
+    assertEqual("B", aiSync.getLodZone(250))
+    assertEqual("C", aiSync.getLodZone(600))
+    assertNear(1 / 60, aiSync.getLodSendInterval("A"), 0.0001)
+    assertNear(0.1, aiSync.getLodSendInterval("B"), 0.0001)
+    assertNil(aiSync.getLodSendInterval("C"))
+end
+
+-- 28. AI batch encode/decode roundtrip
+tests.testAiBatchEncodeDecode = function()
+    local aiSync = extensions.aiTrafficSync
+    local snapshots = {
+        {
+            netId = 7,
+            px = 10.5, py = 2.25, pz = -3.5,
+            qx = 0, qy = 0, qz = 0, qw = 1,
+            vx = 12.3, vy = -4.5, vz = 0.25,
+        },
+        {
+            netId = 42,
+            px = -100, py = 5, pz = 200,
+            qx = 0.1, qy = 0.2, qz = 0.3, qw = 0.9,
+            vx = 0, vy = 15, vz = -2,
+        },
+    }
+    local packet, size = aiSync.buildBatchPacket(snapshots)
+    assertNotNil(packet)
+    assertEqual(12 + 2 * 30, size)
+
+    local decoded = aiSync.decodeBatchPacket(packet)
+    assertEqual(2, #decoded)
+    assertEqual(7, decoded[1].netId)
+    assertNear(10.5, decoded[1].px, 0.05)
+    assertNear(12.3, decoded[1].vx, 0.05)
+    assertEqual(42, decoded[2].netId)
+end
+
+-- 29. AI teleport packet updates puppet state
+tests.testAiTeleportPacket = function()
+    local aiSync = extensions.aiTrafficSync
+    M.setState("CONNECTED")
+    M.setRole("CLIENT")
+    M.setAiTrafficSync(true)
+
+    aiSync._aiNetToLocal[99] = { localId = 5001, model = "pickup" }
+    aiSync.processPacket({
+        type = "ai_teleport",
+        net_id = 99,
+        pos = { x = 1, y = 2, z = 3 },
+        rot = { x = 0, y = 0, z = 0, w = 1 },
+        vel = { x = 5, y = 0, z = -1 },
+    })
+
+    local entry = aiSync._aiNetToLocal[99]
+    assertNear(1, entry.lastPx, 0.001)
+    assertNear(2, entry.lastPy, 0.001)
+    assertNear(5, entry.lastVx, 0.05)
+end
+
+-- 30. AI traffic toggle gates batch processing
+tests.testAiTrafficSyncToggle = function()
+    local aiSync = extensions.aiTrafficSync
+    M.setState("CONNECTED")
+    M.setRole("CLIENT")
+    M.setAiTrafficSync(false)
+
+    local fakeBatch = string.char(84, 65, 73, 66) -- TAIB
+        .. string.char(1, 0, 1, 0, 0, 0, 0, 0)
+        .. string.rep("\0", 30)
+
+    assertFalse(aiSync.applyBatchRaw(fakeBatch))
+
+    M.setAiTrafficSync(true)
+    assertTrue(aiSync.applyBatchRaw(fakeBatch))
 end
 
 -- ============================================================================
@@ -830,7 +1126,7 @@ local function runSuite()
         
         setup()
         
-        local ok, err = pcall(func)
+        local ok, err = xpcall(func, debug.traceback)
         if ok then
             passed = passed + 1
             print("\27[32m[PASS]\27[0m")
@@ -838,7 +1134,7 @@ local function runSuite()
             failed = failed + 1
             table.insert(failedNames, name)
             print("\27[31m[FAIL]\27[0m")
-            print("  Error: " .. tostring(err) .. "\n")
+            print(tostring(err) .. "\n")
         end
     end
     

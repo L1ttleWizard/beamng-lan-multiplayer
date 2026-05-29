@@ -25,6 +25,14 @@ angular.module('beamng.apps')
       scope.jitterBuff = true;
       scope.inputExtrap = true;
       scope.plc = true;
+      scope.strictLifecycle = true;
+      scope.worldWeatherSync = true;
+      scope.worldPropsSync = true;
+      scope.tireWearSync = false;
+      scope.checkpointsUi = true;
+      scope.aiTrafficSync = false;
+      scope.aiTrafficPlc = true;
+      scope.checkpointEvents = [];
 
       // Collapsible & Chat UI states
       scope.showDevSettings = false;
@@ -65,7 +73,14 @@ angular.module('beamng.apps')
         hz: 240,
         pingHistory: [],
         pingMax: 1,
-        sparklinePath: ""
+        sparklinePath: "",
+        pendingAcks: 0,
+        resendAttempts: 0,
+        droppedReliablePackets: 0,
+        activeNetVeh: 0,
+        activeAiPuppets: 0,
+        txAiKBs: 0,
+        rxAiKBs: 0
       };
 
       // Build SVG sparkline path from ping history
@@ -192,6 +207,42 @@ angular.module('beamng.apps')
         bngApi.engineLua('extensions.lanMultiplayer.setPLC(' + scope.plc + ')');
       };
 
+      // Toggle Strict Lifecycle
+      scope.toggleStrictLifecycle = function() {
+        scope.strictLifecycle = !scope.strictLifecycle;
+        bngApi.engineLua('extensions.lanMultiplayer.setStrictLifecycle(' + scope.strictLifecycle + ')');
+      };
+
+      scope.toggleWorldWeatherSync = function() {
+        scope.worldWeatherSync = !scope.worldWeatherSync;
+        bngApi.engineLua('extensions.lanMultiplayer.setWorldWeatherSync(' + scope.worldWeatherSync + ')');
+      };
+
+      scope.toggleWorldPropsSync = function() {
+        scope.worldPropsSync = !scope.worldPropsSync;
+        bngApi.engineLua('extensions.lanMultiplayer.setWorldPropsSync(' + scope.worldPropsSync + ')');
+      };
+
+      scope.toggleTireWearSync = function() {
+        scope.tireWearSync = !scope.tireWearSync;
+        bngApi.engineLua('extensions.lanMultiplayer.setTireWearSync(' + scope.tireWearSync + ')');
+      };
+
+      scope.toggleCheckpointsUi = function() {
+        scope.checkpointsUi = !scope.checkpointsUi;
+        bngApi.engineLua('extensions.lanMultiplayer.setCheckpointsUi(' + scope.checkpointsUi + ')');
+      };
+
+      scope.toggleAiTrafficSync = function() {
+        scope.aiTrafficSync = !scope.aiTrafficSync;
+        bngApi.engineLua('extensions.lanMultiplayer.setAiTrafficSync(' + scope.aiTrafficSync + ')');
+      };
+
+      scope.toggleAiTrafficPlc = function() {
+        scope.aiTrafficPlc = !scope.aiTrafficPlc;
+        bngApi.engineLua('extensions.lanMultiplayer.setAiTrafficPlc(' + scope.aiTrafficPlc + ')');
+      };
+
       // Toggle Developer Settings
       scope.toggleDevSettings = function() {
         scope.showDevSettings = !scope.showDevSettings;
@@ -283,6 +334,27 @@ angular.module('beamng.apps')
           if (data.plc !== undefined) {
             scope.plc = data.plc;
           }
+          if (data.strictLifecycle !== undefined) {
+            scope.strictLifecycle = data.strictLifecycle;
+          }
+          if (data.worldWeatherSync !== undefined) {
+            scope.worldWeatherSync = data.worldWeatherSync;
+          }
+          if (data.worldPropsSync !== undefined) {
+            scope.worldPropsSync = data.worldPropsSync;
+          }
+          if (data.tireWearSync !== undefined) {
+            scope.tireWearSync = data.tireWearSync;
+          }
+          if (data.checkpointsUi !== undefined) {
+            scope.checkpointsUi = data.checkpointsUi;
+          }
+          if (data.aiTrafficSync !== undefined) {
+            scope.aiTrafficSync = data.aiTrafficSync;
+          }
+          if (data.aiTrafficPlc !== undefined) {
+            scope.aiTrafficPlc = data.aiTrafficPlc;
+          }
 
           scope.error = data.error || "";
 
@@ -316,6 +388,13 @@ angular.module('beamng.apps')
           scope.metrics.pingHistory = data.pingHistory || [];
           scope.metrics.pingMax = data.pingMax || 1;
           scope.metrics.sparklinePath = buildSparkline(data.pingHistory, data.pingMax);
+          scope.metrics.pendingAcks = data.pendingAcks || 0;
+          scope.metrics.resendAttempts = data.resendAttempts || 0;
+          scope.metrics.droppedReliablePackets = data.droppedReliablePackets || 0;
+          scope.metrics.activeNetVeh = data.activeNetVeh || 0;
+          scope.metrics.activeAiPuppets = data.activeAiPuppets || 0;
+          scope.metrics.txAiKBs = data.txAiKBs || 0;
+          scope.metrics.rxAiKBs = data.rxAiKBs || 0;
         });
       });
 
@@ -344,6 +423,14 @@ angular.module('beamng.apps')
       });
 
       // Handle chat messages
+      scope.$on('lanMultiplayerCheckpoint', function (event, data) {
+        scope.$evalAsync(function () {
+          if (data.events) {
+            scope.checkpointEvents = data.events;
+          }
+        });
+      });
+
       scope.$on('lanMultiplayerChat', function (event, chat) {
         scope.$evalAsync(function () {
           scope.chatLog.push({

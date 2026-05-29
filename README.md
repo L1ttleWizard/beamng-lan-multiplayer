@@ -13,6 +13,7 @@ A high-performance, low-latency LAN multiplayer mod for BeamNG.drive that synchr
 5. **Damage Sync (Low-Frequency Node Deformation)**: Sends node coordinate deformations (> 3 cm) via separate low-frequency JSON packets ONLY when damage is detected, preventing hot-path network bottlenecks.
 6. **Ghost Mode**: A UI toggle that allows vehicles to pass through each other by disabling Torque3D physics collisions on the remote client.
 7. **Teleport to Friend**: Instantly teleport your vehicle 2 meters above the remote player to prevent collision physics bugs.
+8. **AI Traffic Sync (Host-Authoritative, optional)**: Synchronizes `gameplay_traffic` bots to clients as physics puppets (`ai.setMode("stop")` + `TAIB` binary batches). Includes distance LOD, pool recycle via `ai_teleport`, and roster sync on client connect. Enable **AI Sync** in Developer Settings (traffic must already be active on the host).
 
 ---
 
@@ -38,6 +39,18 @@ The mod is engineered from the ground up to ensure high frame rates and complete
 | **Lights Sync** | Only on state change | None | ~0% (Event-driven command) | None (embedded in main packet) |
 | **Damage Sync** | Only upon crash detection | 0% during driving | ~0.05 ms (one-time on deformation) | Low (short JSON only on impact) |
 | **Ghost Mode** | On demand (button toggle) | 0% | 0% | Zero (single packet toggle) |
+
+---
+
+## Roadmap
+
+- [Stage 4 — AI traffic sync](docs/STAGE4_AI_TRAFFIC.md) (implemented)
+- **[Roadmap 5→6→7 — единый порядок шагов 01–20](docs/ROADMAP_5_6_7.md)** ← начинать здесь
+- [Stage 7 — Content & mods](docs/STAGE7_CONTENT_MODS.md) — шаги **01–02, 05–06**
+- [Stage 5 — Session + dedicated infra](docs/STAGE5_SCALING.md) — шаги **03–04, 08–11**
+- [Stage 6 — Gameplay + network polish](docs/STAGE6_EXPERIMENTAL.md) — шаги **07, 12–19**
+
+**Волна 1 (LAN):** 01 preset → 02 config UI → 03–04 session → 05–06 mods/maps → 07 races.
 
 ---
 

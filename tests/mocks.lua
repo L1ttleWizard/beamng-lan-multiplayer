@@ -11,6 +11,14 @@ function ColorI(r, g, b, a)
     return { r = r or 255, g = g or 255, b = b or 255, a = a or 255 }
 end
 
+-- Mock Point3F class constructor
+function Point3F(x, y, z)
+    if type(x) == "table" or type(x) == "cdata" then
+        return { x = x.x or 0, y = x.y or 0, z = x.z or 0 }
+    end
+    return { x = x or 0, y = y or 0, z = z or 0 }
+end
+
 -- 1. Logging Mock
 function log(level, area, msg)
     if level == "E" then
@@ -143,7 +151,16 @@ function createMockVehicle(id, model, config)
         getRotation = function(self) return self.rotation end,
         getVelocity = function(self) return self.velocity end,
         getAngularVelocity = function(self) return self.angularVelocity end,
+        getDirectionVector = function(self)
+            return self.rotation * vec3(0, 1, 0)
+        end,
+        getDirectionVectorUp = function(self)
+            return self.rotation * vec3(0, 0, 1)
+        end,
         
+        setPositionNoPhysicsReset = function(self, pos)
+            self.position = vec3(pos)
+        end,
         setPosRot = function(self, x, y, z, rx, ry, rz, rw)
             if type(x) == "table" or type(x) == "cdata" then
                 self.position = vec3(x)

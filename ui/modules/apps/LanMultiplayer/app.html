@@ -526,6 +526,44 @@
           </span>
         </div>
 
+        <div class="bng-mp-metrics-sep"></div>
+
+        <!-- Pending ACKs -->
+        <div class="bng-mp-metric">
+          <span class="bng-mp-metric-label">Pending ACKs</span>
+          <span class="bng-mp-metric-value">{{metrics.pendingAcks}}</span>
+        </div>
+        <!-- Resend Attempts -->
+        <div class="bng-mp-metric">
+          <span class="bng-mp-metric-label">Resends</span>
+          <span class="bng-mp-metric-value">{{metrics.resendAttempts}}</span>
+        </div>
+        <!-- Dropped Packets -->
+        <div class="bng-mp-metric">
+          <span class="bng-mp-metric-label">Dropped Packets</span>
+          <span class="bng-mp-metric-value">{{metrics.droppedReliablePackets}}</span>
+        </div>
+        <!-- Active Net Veh -->
+        <div class="bng-mp-metric">
+          <span class="bng-mp-metric-label">Active Net Veh</span>
+          <span class="bng-mp-metric-value">{{metrics.activeNetVeh}}</span>
+        </div>
+        <!-- AI Puppets -->
+        <div class="bng-mp-metric">
+          <span class="bng-mp-metric-label">AI Puppets</span>
+          <span class="bng-mp-metric-value">{{metrics.activeAiPuppets}}</span>
+        </div>
+        <!-- AI TX -->
+        <div class="bng-mp-metric">
+          <span class="bng-mp-metric-label">AI TX</span>
+          <span class="bng-mp-metric-value">{{metrics.txAiKBs}}<span class="bng-mp-metric-unit"> KB/s</span></span>
+        </div>
+        <!-- AI RX -->
+        <div class="bng-mp-metric">
+          <span class="bng-mp-metric-label">AI RX</span>
+          <span class="bng-mp-metric-value">{{metrics.rxAiKBs}}<span class="bng-mp-metric-unit"> KB/s</span></span>
+        </div>
+
         <!-- Sparkline -->
         <div class="bng-mp-sparkline-wrap" ng-if="metrics.pingHistory.length > 1">
           <div class="bng-mp-sparkline-header">
@@ -653,6 +691,17 @@
       </div>
     </div>
 
+    <!-- Checkpoint lap feed (optional) -->
+    <div ng-if="checkpointsUi && checkpointEvents.length > 0" style="margin-bottom: 10px; background: rgba(15,23,42,0.55); border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; padding: 8px;">
+      <div style="font-size: 0.65rem; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">Checkpoints</div>
+      <div ng-repeat="cp in checkpointEvents | limitTo:4 track by $index" style="font-size: 0.72rem; color: #e2e8f0; margin-bottom: 3px;">
+        <span style="color: #818cf8; font-weight: 600;">{{cp.nickname}}</span>
+        <span style="color: #94a3b8;"> @ </span>
+        <span>{{cp.trigger}}</span>
+        <span style="color: #34d399; float: right;">{{cp.elapsed | number:2}}s</span>
+      </div>
+    </div>
+
     <button class="bng-mp-btn bng-mp-btn-red" ng-click="disconnect()">
       {{status == 'CONNECTING' ? 'Cancel Connection' : 'Disconnect'}}
     </button>
@@ -677,6 +726,20 @@
         <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': backfireSync}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleBackfireSync()">Exhaust: {{backfireSync ? 'ON' : 'OFF'}}</button>
         <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': recoverySync}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleRecoverySync()">Recover: {{recoverySync ? 'ON' : 'OFF'}}</button>
       </div>
+
+      <div style="font-size: 0.65rem; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 4px;">World &amp; Racing</div>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 10px;">
+        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': worldWeatherSync}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleWorldWeatherSync()">Time/Weather: {{worldWeatherSync ? 'ON' : 'OFF'}}</button>
+        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': worldPropsSync}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleWorldPropsSync()">Props: {{worldPropsSync ? 'ON' : 'OFF'}}</button>
+        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': tireWearSync}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleTireWearSync()">Tire Wear: {{tireWearSync ? 'ON' : 'OFF'}}</button>
+        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': checkpointsUi}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleCheckpointsUi()">Checkpoints: {{checkpointsUi ? 'ON' : 'OFF'}}</button>
+      </div>
+
+      <div style="font-size: 0.65rem; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 4px;">AI Traffic</div>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 10px;">
+        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': aiTrafficSync}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleAiTrafficSync()">AI Sync: {{aiTrafficSync ? 'ON' : 'OFF'}}</button>
+        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': aiTrafficPlc}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleAiTrafficPlc()">AI PLC: {{aiTrafficPlc ? 'ON' : 'OFF'}}</button>
+      </div>
       
       <div style="font-size: 0.65rem; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 4px;">Network Technology</div>
       <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
@@ -685,6 +748,7 @@
         <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': jitterBuff}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleJitterBuff()">JitterBuf: {{jitterBuff ? 'ON' : 'OFF'}}</button>
         <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': inputExtrap}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem;" ng-click="toggleInputExtrap()">InpExtrap: {{inputExtrap ? 'ON' : 'OFF'}}</button>
         <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': plc}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem; grid-column: 1 / -1;" ng-click="togglePLC()">PLC (DR Extrap): {{plc ? 'ON' : 'OFF'}}</button>
+        <button class="bng-mp-btn" ng-class="{'bng-mp-btn-green': strictLifecycle}" style="margin-top: 0; padding: 6px 4px; font-size: 0.75rem; grid-column: 1 / -1;" ng-click="toggleStrictLifecycle()">Strict Lifecycle: {{strictLifecycle ? 'ON' : 'OFF'}}</button>
       </div>
     </div>
   </div>
