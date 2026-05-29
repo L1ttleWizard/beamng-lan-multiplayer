@@ -1,5 +1,8 @@
 -- Mocks for BeamNG Globals in Unit Tests
 local ffi = require("ffi")
+ffi.cdef[[
+typedef unsigned char uint8_t;
+]]
 
 -- Mock ColorF class constructor
 function ColorF(r, g, b, a)
@@ -300,7 +303,7 @@ ffi.cast = function(ct, init)
     else
         local ok, res = pcall(originalCast, ct, init)
         if ok then return res end
-        error("ffi.cast failed in mock: " .. tostring(res))
+        error("ffi.cast failed in mock for type '" .. tostring(ct) .. "': " .. tostring(res))
     end
 end
 

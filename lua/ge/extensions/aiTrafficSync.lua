@@ -4,7 +4,7 @@ local M = {}
 local ffi = require("ffi")
 local bit = require("bit")
 
-local TAIB_MAGIC = 0x42414954 -- "TAIB" little-endian
+local TAIB_MAGIC = 0x42494154 -- "TAIB" little-endian
 local TAIB_VERSION = 1
 local SNAPSHOT_SIZE = 30
 local HEADER_SIZE = 12
@@ -24,6 +24,7 @@ local VEL_SCALE = 100.0 -- 0.01 m/s per int16 unit
 local QUAT_SCALE = 32767.0
 
 ffi.cdef[[
+#pragma pack(push, 1)
 typedef struct {
     uint32_t net_id;
     float px, py, pz;
@@ -37,9 +38,15 @@ typedef struct {
     uint16_t count;
     uint32_t seq;
 } AIBatchHeader;
+
+typedef struct {
+    AIBatchHeader header;
+    AISnapshot snapshots[15];
+} AIBatchPacket;
+#pragma pack(pop)
 ]]
 
-local batchBuf = ffi.new("uint8_t[?]", MTU_TARGET)
+local batchPacket = ffi.new("AIBatchPacket")
 local outHeader = ffi.new("AIBatchHeader")
 local outSnapshot = ffi.new("AISnapshot")
 
@@ -590,20 +597,16 @@ function M.buildBatchPacket(snapshots)
     end
     local batchCount = math.min(MAX_BATCH, #snapshots)
     local packetSize = HEADER_SIZE + batchCount * SNAPSHOT_SIZE
-    outHeader.magic = TAIB_MAGIC
-    outHeader.version = TAIB_VERSION
-    outHeader.count = batchCount
+    batchPacket.header.magic = TAIB_MAGIC
+    batchPacket.header.version = TAIB_VERSION
+    batchPacket.header.count = batchCount
     M._batchSeq = M._batchSeq + 1
-    outHeader.seq = M._batchSeq
-    ffi.copy(batchBuf, outHeader, HEADER_SIZE)
-    local offset = HEADER_SIZE
+    batchPacket.header.seq = M._batchSeq
     for i = 1, batchCount do
         local s = snapshots[i]
-        encodeSnapshot(outSnapshot, s.netId, s.px, s.py, s.pz, s.qx, s.qy, s.qz, s.qw, s.vx, s.vy, s.vz)
-        ffi.copy(batchBuf + offset, outSnapshot, SNAPSHOT_SIZE)
-        offset = offset + SNAPSHOT_SIZE
+        encodeSnapshot(batchPacket.snapshots[i-1], s.netId, s.px, s.py, s.pz, s.qx, s.qy, s.qz, s.qw, s.vx, s.vy, s.vz)
     end
-    return ffi.string(batchBuf, packetSize), packetSize
+    return ffi.string(batchPacket, packetSize), packetSize
 end
 
 function M.decodeBatchPacket(rawMsg)
