@@ -41,6 +41,18 @@ angular.module('beamng.apps')
       scope.chatLog = [];
       scope.lobbies = [];
 
+      // Wave 1 new properties
+      scope.password = "";
+      scope.garagePresetCode = "";
+      scope.alerts = [];
+      scope.roster = [];
+      scope.countdown = { active: false, seconds: 0 };
+      scope.meetMode = false;
+      scope.countdownSeconds = 3;
+      scope.voteTime = "0.5";
+      scope.voteWeather = "sunny";
+      scope.presetOffer = null;
+
       // Remote telemetry & tandem indicators
       scope.remoteTelemetry = {};
       scope.tandem = {
@@ -441,6 +453,107 @@ angular.module('beamng.apps')
           if (scope.chatLog.length > 50) {
             scope.chatLog.shift();
           }
+        });
+      });
+
+      // Wave 1 scope functions
+      scope.updatePassword = function() {
+        var cleanPwd = scope.password ? scope.password.replace(/["\\\r\n]/g, "") : "";
+        bngApi.engineLua('extensions.lanMultiplayer.setSessionPassword("' + cleanPwd + '")');
+      };
+
+      scope.exportPreset = function() {
+        bngApi.engineLua('extensions.lanMultiplayer.requestGaragePresetCode()');
+      };
+
+      scope.importPreset = function() {
+        if (!scope.garagePresetCode) return;
+        var cleanCode = scope.garagePresetCode.replace(/["\\\r\n]/g, "").trim();
+        bngApi.engineLua('extensions.lanMultiplayer.applyGaragePreset("' + cleanCode + '")');
+      };
+
+      scope.copyPresetToClipboard = function() {
+        if (!scope.garagePresetCode) return;
+        navigator.clipboard.writeText(scope.garagePresetCode).then(function() {
+          scope.$evalAsync(function() {
+            var alert = { type: 'success', message: 'Preset code copied to clipboard!' };
+            scope.alerts.push(alert);
+            setTimeout(function() {
+              scope.$evalAsync(function() {
+                var idx = scope.alerts.indexOf(alert);
+                if (idx !== -1) scope.alerts.splice(idx, 1);
+              });
+            }, 3000);
+          });
+        });
+      };
+
+      scope.startCountdown = function(seconds) {
+        var s = parseInt(seconds, 10) || 3;
+        bngApi.engineLua('extensions.lanMultiplayer.startRaceCountdown(' + s + ')');
+      };
+
+      scope.submitVote = function(type, val) {
+        var cleanType = type.replace(/["\\\r\n]/g, "");
+        var cleanVal = val.replace(/["\\\r\n]/g, "");
+        bngApi.engineLua('extensions.lanMultiplayer.submitEnvironmentVote("' + cleanType + '", "' + cleanVal + '")');
+      };
+
+      scope.toggleMeetMode = function() {
+        scope.meetMode = !scope.meetMode;
+        if (scope.meetMode) {
+          bngApi.engineLua('extensions.lanMultiplayer.setSoundSync(true)');
+          bngApi.engineLua('extensions.lanMultiplayer.setCheckpointsUi(false)');
+          scope.soundSync = true;
+          scope.checkpointsUi = false;
+        }
+      };
+
+      scope.dismissAlert = function(alert) {
+        var idx = scope.alerts.indexOf(alert);
+        if (idx !== -1) {
+          scope.alerts.splice(idx, 1);
+        }
+      };
+
+      // Wave 1 event listeners
+      scope.$on('lanMultiplayerAlert', function (event, alert) {
+        scope.$evalAsync(function () {
+          scope.alerts.push(alert);
+          setTimeout(function () {
+            scope.$evalAsync(function () {
+              var idx = scope.alerts.indexOf(alert);
+              if (idx !== -1) {
+                scope.alerts.splice(idx, 1);
+              }
+            });
+          }, 5000);
+        });
+      });
+
+      scope.$on('lanMultiplayerGaragePresetCode', function (event, code) {
+        scope.$evalAsync(function () {
+          scope.garagePresetCode = code;
+        });
+      });
+
+      scope.$on('lanMultiplayerRosterUpdate', function (event, roster) {
+        scope.$evalAsync(function () {
+          scope.roster = roster || [];
+        });
+      });
+
+      scope.$on('lanMultiplayerRaceCountdown', function (event, data) {
+        scope.$evalAsync(function () {
+          scope.countdown.active = data.active;
+          scope.countdown.seconds = data.seconds;
+        });
+      });
+
+      scope.$on('lanMultiplayerPresetOffer', function (event, data) {
+        scope.$evalAsync(function () {
+          scope.presetOffer = data;
+          scope.garagePresetCode = data.preset_code || "";
         });
       });
 

@@ -303,6 +303,14 @@ local function notifyMetrics()
                 rxAiKBs = aiMetrics.rxAiKBs or 0
             end
         end
+        if extensions.sessionSync then
+            local roster = {
+                { nickname = myNickname or "Player", role = role, ping = 0 },
+                { nickname = remoteNickname or "Friend", role = (role == "HOST" and "CLIENT" or "HOST"), ping = math.floor(currentPing + 0.5) }
+            }
+            extensions.sessionSync.updateRoster(roster)
+        end
+
         guihooks.trigger("lanMultiplayerMetrics", {
             ping = math.floor(currentPing + 0.5),
             jitter = math.floor(currentJitter * 10 + 0.5) / 10,
@@ -484,6 +492,16 @@ local function checkAndLoadMap(hostMapPath)
     if not hostMapPath then return end
     local myMapPath = getCurrentMapPath()
     if myMapPath ~= hostMapPath then
+        if extensions.contentSync and not extensions.contentSync.validateMapExists(hostMapPath) then
+            log('E', 'lanMultiplayer', 'Host map does not exist on client: ' .. tostring(hostMapPath))
+            if guihooks then
+                guihooks.trigger("lanMultiplayerAlert", {
+                    type = "danger",
+                    message = "Missing map! Host is on " .. hostMapPath .. " which you do not have."
+                })
+            end
+            return
+        end
         log('I', 'lanMultiplayer', 'Map mismatch! Host is on: ' .. tostring(hostMapPath) .. '. Loading map...')
         if core_levels and core_levels.startLevel then
             core_levels.startLevel(hostMapPath)
@@ -2817,6 +2835,17 @@ local function applyGaragePreset(code)
     return false
 end
 
+local function requestGaragePresetCode()
+    local myVeh = be:getPlayerVehicle(0)
+    if not myVeh then return end
+    if extensions.contentSync then
+        local code = extensions.contentSync.exportGaragePreset(myVeh:getId())
+        if code and guihooks then
+            guihooks.trigger("lanMultiplayerGaragePresetCode", code)
+        end
+    end
+end
+
 local function startRaceCountdown(seconds)
     if extensions.raceSync then
         extensions.raceSync.startCountdown(seconds)
@@ -2885,6 +2914,7 @@ M.startRaceCountdown = startRaceCountdown
 M.setConvoyLeader = setConvoyLeader
 M.submitEnvironmentVote = submitEnvironmentVote
 M.setSessionPassword = setSessionPassword
+M.requestGaragePresetCode = requestGaragePresetCode
 
 -- Internal API exports for testing
 M.getInputsRaw = getInputsRaw
