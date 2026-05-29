@@ -119,7 +119,9 @@ function M.applyGaragePreset(presetCode)
         if currentVeh then
             if core_vehicles.removeVehicle then
                 core_vehicles.removeVehicle(currentVeh:getId())
-            else
+            elseif core_vehicles.deleteVehicle then
+                core_vehicles.deleteVehicle(currentVeh:getId())
+            elseif type(currentVeh.delete) == 'function' then
                 currentVeh:delete()
             end
         end

@@ -1101,6 +1101,245 @@ tests.testAiTrafficSyncToggle = function()
     assertTrue(aiSync.applyBatchRaw(fakeBatch))
 end
 
+-- 31. Garage Preset Export/Import Roundtrip
+tests.testGaragePresetRoundtrip = function()
+    local contentSync = require("lua/ge/extensions/contentSync")
+    assertNotNil(contentSync, "contentSync extension should be loaded")
+
+    -- Setup mock vehicle
+    local mockId = 123
+    local mockVeh = createMockVehicle(mockId, "etk800", { parts = {}, vars = { licenseText = "MP" } })
+    mockVeh.color = { x = 0.5, y = 0.5, z = 0.5, w = 1.0 }
+    
+    -- Mock vehicle manager
+    extensions.core_vehicle_manager = {
+        getVehicleData = function(id)
+            if id == mockId then
+                return {
+                    config = {
+                        vars = { licenseText = "MP-TEST" },
+                        paints = {
+                            { baseColor = { 1, 0, 0, 1 } }
+                        }
+                    }
+                }
+            end
+            return nil
+        end
+    }
+
+    local presetCode = contentSync.exportGaragePreset(mockId)
+    assertNotNil(presetCode)
+    assertTrue(presetCode:find("^BLMP%-") ~= nil)
+    assertTrue(#presetCode < 500)
+
+    -- Mock be:getPlayerVehicle to return the current vehicle which will be deleted
+    be.playerVehicle = mockVeh
+    
+    local ok = contentSync.applyGaragePreset(presetCode)
+    assertTrue(ok)
+    assertEqual(1, #core_vehicles.spawned)
+    assertEqual("etk800", core_vehicles.spawned[1].model)
+    assertEqual("MP-TEST", core_vehicles.spawned[1].options.config.vars.licenseText)
+    
+    extensions.core_vehicle_manager = nil
+end
+
+-- 32. Mods Fingerprint Test
+tests.testModsFingerprint = function()
+    local contentSync = require("lua/ge/extensions/contentSync")
+    
+    -- Mock core_modmanager
+    core_modmanager = {
+        getModList = function()
+            return {
+                ["mod_a"] = { active = true },
+                ["mod_b"] = { active = false },
+                ["mod_c"] = { active = true }
+            }
+        end
+    }
+    
+    local fp = contentSync.getModsFingerprint()
+    assertNotNil(fp)
+    assertNotNil(fp.mods_hash)
+    assertEqual(2, fp.mods_count)
+    assertEqual(2, #fp.mods_sample)
+    assertEqual("mod_a", fp.mods_sample[1])
+    assertEqual("mod_c", fp.mods_sample[2])
+    
+    core_modmanager = nil
+end
+
+-- 33. Map Validation Test
+tests.testMapValidation = function()
+    local contentSync = require("lua/ge/extensions/contentSync")
+    
+    -- Mock FS
+    FS = {
+        directoryExists = function(self, path)
+            if path == "levels/gridmap_v2" or path == "levels/gridmap_v2/" or path == "/levels/gridmap_v2" then return true end
+            return false
+        end
+    }
+    
+    assertTrue(contentSync.validateMapExists("levels/gridmap_v2"))
+    assertFalse(contentSync.validateMapExists("levels/nonexistent"))
+    
+    FS = nil
+end
+
+-- 34. Config Truncation Verification
+tests.testConfigTruncation = function()
+    local normalConfig = { parts = { engine = "stage1" } }
+    local config, truncated, reason = M.getSafeConfigPayload(normalConfig)
+    assertEqual("stage1", config.parts.engine)
+    assertFalse(truncated)
+    assertNil(reason)
+
+    -- Artificially huge configuration
+    local hugeConfig = { parts = {}, vars = { turboBoost = 2.5 } }
+    for i = 1, 100 do
+        hugeConfig.parts["custom_fender_slot_part_index_" .. i] = "very_long_custom_part_name_installed_on_chassis_" .. i
+    end
+    
+    local config2, truncated2, reason2 = M.getSafeConfigPayload(hugeConfig)
+    assertNil(config2.parts)
+    assertNotNil(config2.vars)
+    assertEqual(2.5, config2.vars.turboBoost)
+    assertTrue(truncated2)
+    assertEqual("size", reason2)
+end
+
+-- 35. Reconnection FSM Transitions
+tests.testReconnectionFSM = function()
+    local sessionSync = require("lua/ge/extensions/sessionSync")
+    assertNotNil(sessionSync)
+    
+    -- Normal operation: no transition if packets are fresh
+    local now = os.clock()
+    local nextState = sessionSync.tickReconnectFSM("CONNECTED", "CLIENT", now, 0.1)
+    assertNil(nextState)
+    
+    -- Sim stopped packets for 2.1s -> should transition to RECONNECTING
+    local nextState2 = sessionSync.tickReconnectFSM("CONNECTED", "CLIENT", now - 2.1, 0.1)
+    assertEqual("RECONNECTING", nextState2)
+    
+    -- Resumed packets -> should recover to CONNECTED
+    local nextState3 = sessionSync.tickReconnectFSM("RECONNECTING", "CLIENT", now - 0.5, 0.1)
+    assertEqual("CONNECTED", nextState3)
+    
+    -- Mismatch for 5.1s -> should timeout
+    local nextState4 = sessionSync.tickReconnectFSM("RECONNECTING", "CLIENT", now - 5.1, 0.1)
+    assertEqual("TIMEOUT", nextState4)
+end
+
+-- 36. Handshake Version and Password Verification
+tests.testHandshakeVersionVerification = function()
+    local sessionSync = require("lua/ge/extensions/sessionSync")
+    assertNotNil(sessionSync)
+    
+    -- Valid handshake
+    local validPayload = {
+        protocol_version = sessionSync.PROTOCOL_VERSION,
+        mod_version = sessionSync.MOD_VERSION,
+        game_version = sessionSync.GAME_VERSION
+    }
+    local res = sessionSync.verifyHandshake(validPayload)
+    assertTrue(res.ok)
+    
+    -- Invalid protocol
+    local invalidProto = {
+        protocol_version = 999,
+        mod_version = sessionSync.MOD_VERSION
+    }
+    local resProto = sessionSync.verifyHandshake(invalidProto)
+    assertFalse(resProto.ok)
+    assertEqual("protocol_mismatch", resProto.reason)
+    
+    -- Invalid mod
+    local invalidMod = {
+        protocol_version = sessionSync.PROTOCOL_VERSION,
+        mod_version = "0.0.1"
+    }
+    local resMod = sessionSync.verifyHandshake(invalidMod)
+    assertFalse(resMod.ok)
+    assertEqual("mod_mismatch", resMod.reason)
+end
+
+-- 37. Trailer Attachment Sync
+tests.testTrailerSync = function()
+    local vehicleSync = require("lua/ge/extensions/vehicleSync")
+    assertNotNil(vehicleSync)
+    
+    -- Setup peer mapping
+    M._peerToLocalVehicles = {
+        [200] = 2000, -- main vehicle
+        [300] = 3000  -- trailer
+    }
+    
+    local mainVeh = createMockVehicle(2000, "etk800", {})
+    local trailerVeh = createMockVehicle(3000, "trailer", {})
+    
+    -- Mock handlePacket trailer_attach
+    local ok = vehicleSync.handlePacket({
+        type = "trailer_attach",
+        vehicle_id = 200,
+        trailer_id = 300
+    })
+    assertTrue(ok)
+    
+    -- Verify queueLuaCommand was called on main vehicle to attach couplers
+    assertEqual(1, #mainVeh.queuedCommands)
+    assertTrue(mainVeh.queuedCommands[1]:find("attachCouplers") ~= nil)
+    
+    -- Mock handlePacket trailer_detach
+    local ok2 = vehicleSync.handlePacket({
+        type = "trailer_detach",
+        vehicle_id = 200,
+        trailer_id = 300
+    })
+    assertTrue(ok2)
+    assertEqual(2, #mainVeh.queuedCommands)
+    assertTrue(mainVeh.queuedCommands[2]:find("detachCouplers") ~= nil)
+    
+    M._peerToLocalVehicles = {}
+end
+
+-- 38. Race Countdown and Throttle Locking
+tests.testCountdownSync = function()
+    local raceSync = require("lua/ge/extensions/raceSync")
+    assertNotNil(raceSync)
+    
+    -- Setup mock player vehicle
+    local myVeh = createMockVehicle(999, "etk800", {})
+    be.playerVehicle = myVeh
+    
+    -- Mock os.clock to control time synchronously
+    local oldClock = os.clock
+    local fakeTime = 100.0
+    os.clock = function() return fakeTime end
+    
+    -- Start countdown: 3 seconds
+    raceSync.startCountdown(3)
+    assertTrue(raceSync.isThrottleLocked())
+    
+    -- Run onUpdate: should lock throttle
+    fakeTime = fakeTime + 0.1
+    raceSync.onUpdate(0.1)
+    assertEqual(2, #myVeh.queuedCommands)
+    assertTrue(myVeh.queuedCommands[1]:find("throttle") ~= nil)
+    
+    -- Wait until countdown finishes
+    fakeTime = fakeTime + 3.0
+    raceSync.onUpdate(3.0)
+    assertFalse(raceSync.isThrottleLocked())
+    
+    -- Restore os.clock
+    os.clock = oldClock
+    be.playerVehicle = nil
+end
+
 -- ============================================================================
 -- TEST RUNNER ENGINE
 -- ============================================================================

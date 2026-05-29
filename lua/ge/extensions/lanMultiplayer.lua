@@ -374,17 +374,17 @@ end
 
 -- Check JSON-encoded size and downgrade/strip parts if too large to prevent fragmentation
 local function getSafeConfigPayload(config)
-    if not config then return nil end
+    if not config then return nil, false, nil end
     if type(config) ~= "table" then
-        return config
+        return config, false, nil
     end
     
     local minConfig = getMinimizedConfig(config)
     local jsonStr = jsonEncode(minConfig)
-    if not jsonStr then return nil end
+    if not jsonStr then return nil, false, nil end
     
     if #jsonStr <= 1000 then
-        return minConfig
+        return minConfig, false, nil
     end
     
     log('W', 'lanMultiplayer', 'Vehicle parts configuration is too large (' .. tostring(#jsonStr) .. ' bytes). Dropping custom parts to prevent packet fragmentation.')
@@ -393,11 +393,11 @@ local function getSafeConfigPayload(config)
         local varsOnly = { vars = minConfig.vars }
         local varsJson = jsonEncode(varsOnly)
         if varsJson and #varsJson <= 1000 then
-            return varsOnly
+            return varsOnly, true, "size"
         end
     end
     
-    return nil
+    return nil, true, "size"
 end
 
 -- Deep table equivalence comparison (order-independent)
@@ -737,10 +737,11 @@ local function host(port)
 end
 
 -- Connect to host
-local function connect(ip, port, localPort)
+local function connect(ip, port, localPort, password)
     savedIp = ip or "127.0.0.1"
     savedPort = port or 27015
     savedClientPort = localPort or 0
+    M.savedPassword = password or ""
     
     disconnect()
     
@@ -872,7 +873,7 @@ local function sendPacketReliable(payload)
 end
 
 -- Send update packet with zero Lua-GC allocations using binary FFI struct
-local function sendUpdate()
+function M.sendUpdate()
     local myVeh = be:getPlayerVehicle(0)
     if not myVeh then return end
     
@@ -998,13 +999,21 @@ local function sendSpawn(model, config)
     local pos = (myVeh.getPosition and myVeh:getPosition()) or vec3(0,0,0)
     local rot = getVehicleRotationQuat(myVeh)
     
-    local safeConfig = getSafeConfigPayload(config)
+    local safeConfig, truncated, reason = getSafeConfigPayload(config)
+    if truncated and guihooks then
+        guihooks.trigger("lanMultiplayerAlert", {
+            type = "warning",
+            message = "Config truncated (>1000B). Friend sees stock."
+        })
+    end
     
     local payload = {
         type = "spawn",
         vehicle_id = myVeh:getId(),
         model = model,
         config = safeConfig,
+        config_truncated = truncated,
+        config_truncated_reason = reason,
         nickname = myNickname,
         pos = { x = pos.x, y = pos.y, z = pos.z },
         rot = { x = rot.x, y = rot.y, z = rot.z, w = rot.w }
@@ -1019,7 +1028,7 @@ local function sendReset()
 end
 
 -- Send ping packet
-local function sendPing()
+function M.sendPing()
     pingSeq = pingSeq + 1
     pingSendTime[pingSeq] = socket.gettime()
     sendRaw(string.format('{"t":"ping","s":%d}', pingSeq))
@@ -1077,7 +1086,7 @@ local function processPong(seq)
 end
 
 -- Calculate per-second metrics
-local function updateMetricsWindow()
+function M.updateMetricsWindow()
     txRate = txPackets
     rxRate = rxPackets
     txBandwidth = txBytes / 1024   -- KB/s
@@ -1098,7 +1107,7 @@ local function updateMetricsWindow()
 end
 
 -- Adaptive send rate adjustment
-local function adaptSendRate()
+function M.adaptSendRate()
     if not M.adaptiveHzEnabled then
         sendRate = minSendRate
         currentHz = math.floor(1 / minSendRate + 0.5)
@@ -1318,7 +1327,7 @@ local function updateRemoteVehicle(data)
 end
 
 -- Apply smoothed remote vehicle state every frame using pre-allocated objects
-local function applySmoothedRemoteState(dtReal)
+function M.applySmoothedRemoteState(dtReal)
     if not _G.tests then
         if remoteVehicleId and hasRemoteState then
             local remoteVeh = be:getObjectByID(remoteVehicleId)
@@ -1535,13 +1544,59 @@ local function processPacket(rawMsg, ip, port)
         return
     end
     
+    if msgType == "session_error" then
+        log('E', 'lanMultiplayer', 'Session error received: ' .. tostring(msg.details))
+        disconnect()
+        notifyUI(msg.details or "Connection rejected by host")
+        if guihooks then
+            guihooks.trigger("lanMultiplayerAlert", {
+                type = "error",
+                message = msg.details or "Connection rejected by host"
+            })
+        end
+        return
+    end
+    
     if (state == "HOSTING" or (state == "CONNECTED" and role == "HOST")) and msgType == "connect" then
+        if extensions.sessionSync then
+            local res = extensions.sessionSync.verifyHandshake(msg)
+            if not res.ok then
+                log('W', 'lanMultiplayer', 'Handshake failed: ' .. tostring(res.details))
+                sendPacket({
+                    type = "session_error",
+                    reason = res.reason,
+                    details = res.details
+                })
+                return
+            end
+        end
+        
         targetIp = ip
         targetPort = port
         state = "CONNECTED"
         remoteNickname = msg.nickname or "Client"
         resetMetrics()
         log('I', 'lanMultiplayer', 'Client connected/reconnected from ' .. tostring(ip) .. ':' .. tostring(port) .. ' (' .. tostring(remoteNickname) .. ')')
+        
+        if extensions.contentSync and msg.mods_hash then
+            local myMods = extensions.contentSync.getModsFingerprint()
+            if myMods.mods_hash ~= msg.mods_hash then
+                log('W', 'lanMultiplayer', 'Mods hash mismatch: host=' .. myMods.mods_hash .. ', client=' .. msg.mods_hash)
+                if guihooks then
+                    guihooks.trigger("lanMultiplayerAlert", {
+                        type = "warning",
+                        message = "Mods hash mismatch! Client has different mods loaded."
+                    })
+                end
+            end
+        end
+        
+        if msg.config_truncated and guihooks then
+            guihooks.trigger("lanMultiplayerAlert", {
+                type = "warning",
+                message = "Friend's config simplified - stock possible."
+            })
+        end
         
         if msg.vehicle_id then
             M._pendingSpawnPeerVehicleId = msg.vehicle_id
@@ -1552,15 +1607,18 @@ local function processPacket(rawMsg, ip, port)
         local pos = myVeh and myVeh.getPosition and myVeh:getPosition()
         local rot = myVeh and getVehicleRotationQuat(myVeh)
         
-        local safeConfig = getSafeConfigPayload(config)
+        local safeConfig, truncated, reason = getSafeConfigPayload(config)
         
         local payload = {
             type = "connect_ack",
             vehicle_id = myVeh and myVeh:getId(),
             model = model,
             config = safeConfig,
+            config_truncated = truncated,
+            config_truncated_reason = reason,
             nickname = myNickname,
             mapPath = getCurrentMapPath(),
+            mods_hash = extensions.contentSync and extensions.contentSync.getModsFingerprint().mods_hash or nil,
             pos = pos and { x = pos.x, y = pos.y, z = pos.z } or nil,
             rot = rot and { x = rot.x, y = rot.y, z = rot.z, w = rot.w } or nil
         }
@@ -1582,6 +1640,26 @@ local function processPacket(rawMsg, ip, port)
         resetMetrics()
         log('I', 'lanMultiplayer', 'Connected to host successfully! (' .. tostring(remoteNickname) .. ')')
         notifyUI()
+        
+        if extensions.contentSync and msg.mods_hash then
+            local myMods = extensions.contentSync.getModsFingerprint()
+            if myMods.mods_hash ~= msg.mods_hash then
+                log('W', 'lanMultiplayer', 'Mods hash mismatch: client=' .. myMods.mods_hash .. ', host=' .. msg.mods_hash)
+                if guihooks then
+                    guihooks.trigger("lanMultiplayerAlert", {
+                        type = "warning",
+                        message = "Mods hash mismatch! Host has different mods loaded."
+                    })
+                end
+            end
+        end
+        
+        if msg.config_truncated and guihooks then
+            guihooks.trigger("lanMultiplayerAlert", {
+                type = "warning",
+                message = "Friend's config simplified - stock possible."
+            })
+        end
         
         checkAndLoadMap(msg.mapPath)
         
@@ -1679,12 +1757,25 @@ local function processPacket(rawMsg, ip, port)
                     log('I', 'lanMultiplayer', 'Applied remote recovery snap.')
                 end
             end
+        elseif msgType == "garage_preset_offer" then
+            if guihooks then
+                guihooks.trigger("lanMultiplayerPresetOffer", {
+                    preset_code = msg.preset_code,
+                    from_nickname = msg.from_nickname or "Friend"
+                })
+            end
+        elseif msgType == "map_change" then
+            checkAndLoadMap(msg.mapPath)
         elseif extensions.worldSync and extensions.worldSync.processPacket and extensions.worldSync.processPacket(msg) then
             -- world sync handled
         elseif extensions.gameplaySync and extensions.gameplaySync.processPacket and extensions.gameplaySync.processPacket(msg) then
             -- gameplay sync handled
         elseif extensions.aiTrafficSync and extensions.aiTrafficSync.processPacket and extensions.aiTrafficSync.processPacket(msg) then
             -- ai traffic sync handled
+        elseif extensions.vehicleSync and extensions.vehicleSync.handlePacket and extensions.vehicleSync.handlePacket(msg) then
+            -- vehicle sync handled
+        elseif extensions.raceSync and extensions.raceSync.handlePacket and extensions.raceSync.handlePacket(msg) then
+            -- race sync handled
         elseif msgType == "chat" then
             guihooks.trigger("lanMultiplayerChat", {
                 sender = msg.sender or "Friend",
@@ -1699,7 +1790,7 @@ local function processPacket(rawMsg, ip, port)
 end
 
 -- Read socket inputs and drop duplicate/old updates
-local function receivePackets()
+function M.receivePackets()
     if not udpSocket then return end
     
     local latestUpdateMsg = nil
@@ -1797,7 +1888,7 @@ local function receivePackets()
 end
 
 -- Connection handshake routine for client
-local function handleConnectingHandshake(dt)
+function M.handleConnectingHandshake(dt)
     if state ~= "CONNECTING" then return end
     
     connectTimer = connectTimer + dt
@@ -1808,13 +1899,20 @@ local function handleConnectingHandshake(dt)
         local pos = myVeh and myVeh.getPosition and myVeh:getPosition()
         local rot = myVeh and getVehicleRotationQuat(myVeh)
         
-        local safeConfig = getSafeConfigPayload(config)
+        local safeConfig, truncated, reason = getSafeConfigPayload(config)
         
         local payload = {
             type = "connect",
+            protocol_version = extensions.sessionSync and extensions.sessionSync.PROTOCOL_VERSION or 2,
+            mod_version = extensions.sessionSync and extensions.sessionSync.MOD_VERSION or "5.0.0",
+            game_version = beamngVersion or (extensions.sessionSync and extensions.sessionSync.GAME_VERSION or "0.36.x"),
+            password = M.savedPassword or "",
+            mods_hash = extensions.contentSync and extensions.contentSync.getModsFingerprint().mods_hash or nil,
             vehicle_id = myVeh and myVeh:getId(),
             model = model,
             config = safeConfig,
+            config_truncated = truncated,
+            config_truncated_reason = reason,
             nickname = myNickname,
             mapPath = getCurrentMapPath(),
             pos = pos and { x = pos.x, y = pos.y, z = pos.z } or nil,
@@ -1825,10 +1923,21 @@ local function handleConnectingHandshake(dt)
 end
 
 -- Timeout detection
-local function checkTimeout()
-    if state == "CONNECTED" then
-        if os.clock() - lastPacketTime > timeoutLimit then
-            log('W', 'lanMultiplayer', 'Connection timed out!')
+function M.checkTimeout(dt)
+    if state == "CONNECTED" or state == "RECONNECTING" then
+        if extensions.sessionSync then
+            local nextState = extensions.sessionSync.tickReconnectFSM(state, role, lastPacketTime, dt)
+            if nextState == "TIMEOUT" then
+                log('W', 'lanMultiplayer', 'Connection timed out during reconnection window!')
+                disconnect()
+                notifyUI("Connection timed out")
+            elseif nextState then
+                state = nextState
+                notifyUI()
+            end
+        else
+            if os.clock() - lastPacketTime > timeoutLimit then
+                log('W', 'lanMultiplayer', 'Connection timed out!')
             if role == "HOST" then
                 deleteRemoteVehicle()
                 targetIp = nil
@@ -1849,75 +1958,439 @@ local function checkTimeout()
         end
     end
 end
+end
+
+local function doIdleUpdate(dtReal)
+    -- FIX: Avoid re-creating the socket every frame on bind failure.
+    -- Only try to create if we don't have one yet.
+    if not discoveryRecvSocket then
+        local sock = socket.udp()
+        sock:settimeout(0)
+        local success, bindErr = sock:setsockname("0.0.0.0", 27019)
+        if success then
+            discoveryRecvSocket = sock
+        else
+            -- FIX: Close the socket if binding failed to prevent fd leak
+            sock:close()
+            -- Back off: don't retry every frame, only every 5 seconds
+            M._discoveryRetryTimer = (M._discoveryRetryTimer or 0) + dtReal
+            if M._discoveryRetryTimer < 5.0 then return end
+            M._discoveryRetryTimer = 0
+        end
+    end
+    
+    if discoveryRecvSocket then
+        local data, ip, port = discoveryRecvSocket:receivefrom()
+        local receivedAny = false
+        while data do
+            local msg = jsonDecode(data)
+            if msg and msg.type == "lobby" then
+                local key = string.format("%s:%d", ip, msg.port or 27015)
+                discoveredLobbies[key] = {
+                    nickname = msg.nickname or "Host",
+                    ip = ip,
+                    port = msg.port or 27015,
+                    lastHeard = os.clock()
+                }
+                receivedAny = true
+            end
+            data, ip, port = discoveryRecvSocket:receivefrom()
+        end
+        
+        lobbyCleanTimer = lobbyCleanTimer + dtReal
+        if lobbyCleanTimer >= 1.0 or receivedAny then
+            lobbyCleanTimer = 0
+            local now = os.clock()
+            local changed = false
+            for key, lobby in pairs(discoveredLobbies) do
+                if now - lobby.lastHeard > 10.0 then
+                    discoveredLobbies[key] = nil
+                    changed = true
+                end
+            end
+            
+            if changed or receivedAny then
+                local list = {}
+                for _, lobby in pairs(discoveredLobbies) do
+                    table.insert(list, {
+                        nickname = lobby.nickname,
+                        ip = lobby.ip,
+                        port = lobby.port
+                    })
+                end
+                if guihooks then
+                    guihooks.trigger("lanMultiplayerLobby", list)
+                end
+            end
+        end
+    end
+end
+
+local function doConnectedUpdate(dtReal)
+    M.receivePackets()
+    M.handleConnectingHandshake(dtReal)
+    M.checkTimeout(dtReal)
+    
+    if (state == "HOSTING" or state == "CONNECTED") and role == "HOST" then
+        beaconTimer = beaconTimer + dtReal
+        if beaconTimer >= 3.0 then
+            beaconTimer = 0
+            if not discoverySendSocket then
+                local sock = socket.udp()
+                sock:settimeout(0)
+                sock:setoption("broadcast", true)
+                discoverySendSocket = sock
+            end
+            if discoverySendSocket then
+                local payload = jsonEncode({
+                    type = "lobby",
+                    nickname = myNickname,
+                    port = listenPort
+                })
+                discoverySendSocket:sendto(payload, "255.255.255.255", 27019)
+            end
+        end
+    else
+        beaconTimer = 0
+        if discoverySendSocket then
+            discoverySendSocket:close()
+            discoverySendSocket = nil
+        end
+    end
+    
+    if extensions.worldSync and extensions.worldSync.onUpdate then
+        extensions.worldSync.onUpdate(dtReal)
+    end
+    if extensions.gameplaySync and extensions.gameplaySync.onUpdate then
+        extensions.gameplaySync.onUpdate(dtReal)
+    end
+    if extensions.aiTrafficSync and extensions.aiTrafficSync.onUpdate then
+        extensions.aiTrafficSync.onUpdate(dtReal)
+    end
+    if extensions.raceSync and extensions.raceSync.onUpdate then
+        extensions.raceSync.onUpdate(dtReal)
+    end
+
+    if state == "CONNECTED" then
+        sendTimer = sendTimer + dtReal
+        if sendTimer >= sendRate then
+            sendTimer = sendTimer - sendRate
+            if sendTimer > sendRate then
+                sendTimer = 0
+            end
+            
+            local myVeh = be:getPlayerVehicle(0)
+            if myVeh then
+                local myId = myVeh:getId()
+                
+                vehicleCheckTimer = vehicleCheckTimer + dtReal
+                if vehicleCheckTimer >= 1.0 or myId ~= myVehicleId then
+                    vehicleCheckTimer = 0
+                    local model, config = getVehicleInfo(myVeh)
+                    if myId ~= myVehicleId or model ~= lastMyVehicleModel or not areConfigsEqual(config, lastMyVehicleConfig) then
+                        myVehicleId = myId
+                        lastMyVehicleModel = model
+                        lastMyVehicleConfig = config
+                        log('I', 'lanMultiplayer', 'Vehicle change detected. Sending spawn packet.')
+                        sendSpawn(model, config)
+                        
+                        if core_vehicleBridge then
+                            core_vehicleBridge.registerValueChangeNotification(myVeh, 'rpm')
+                            core_vehicleBridge.registerValueChangeNotification(myVeh, 'wheelspeed')
+                            core_vehicleBridge.registerValueChangeNotification(myVeh, 'gearIndex')
+                            core_vehicleBridge.registerValueChangeNotification(myVeh, 'lights_state')
+                            core_vehicleBridge.registerValueChangeNotification(myVeh, 'signal_L')
+                            core_vehicleBridge.registerValueChangeNotification(myVeh, 'signal_R')
+                            core_vehicleBridge.registerValueChangeNotification(myVeh, 'hazard')
+                            core_vehicleBridge.registerValueChangeNotification(myVeh, 'fog')
+                            core_vehicleBridge.registerValueChangeNotification(myVeh, 'lightbar')
+                            core_vehicleBridge.registerValueChangeNotification(myVeh, 'horn')
+                        end
+                    end
+                end
+                
+                if M.backfireSyncEnabled then
+                    local localBackfire = core_vehicleBridge.getCachedVehicleData(myId, 'backfire') or 0
+                    if localBackfire > 0 and not M._localBackfireTriggered then
+                        M._localBackfireTriggered = true
+                        sendPacket({ type = "backfire" })
+                    elseif localBackfire == 0 then
+                        M._localBackfireTriggered = false
+                    end
+                end
+                
+                local currentPos = myVeh:getPosition()
+                if prevLocalPosInitialized then
+                    local dist = currentPos:distance(prevLocalPos)
+                    local speed = myVeh:getVelocity():length()
+                    if M.recoverySyncEnabled and dist > 10.0 and speed < 5.0 then
+                        local rot = getVehicleRotationQuat(myVeh)
+                        sendPacketReliable({
+                            type = "recovery",
+                            pos = { x = currentPos.x, y = currentPos.y, z = currentPos.z },
+                            rot = { x = rot.x, y = rot.y, z = rot.z, w = rot.w }
+                        })
+                        log('I', 'lanMultiplayer', 'Local vehicle recovery snap detected. Sending sync packet.')
+                    end
+                end
+                prevLocalPos.x = currentPos.x
+                prevLocalPos.y = currentPos.y
+                prevLocalPos.z = currentPos.z
+                prevLocalPosInitialized = true
+                
+                M.sendUpdate()
+            end
+        end
+        
+        if remoteVehicleId and hasRemoteState then
+            if M.inputExtrapEnabled then
+                local alpha = 1.0 - math.exp(-15 * dtReal)
+                lastRemoteInputs.t = lastRemoteInputs.t + alpha * (remoteTargetInputs.t - lastRemoteInputs.t)
+                lastRemoteInputs.s = lastRemoteInputs.s + alpha * (remoteTargetInputs.s - lastRemoteInputs.s)
+                lastRemoteInputs.b = lastRemoteInputs.b + alpha * (remoteTargetInputs.b - lastRemoteInputs.b)
+                lastRemoteInputs.c = lastRemoteInputs.c + alpha * (remoteTargetInputs.c - lastRemoteInputs.c)
+                lastRemoteInputs.hb = lastRemoteInputs.hb + alpha * (remoteTargetInputs.hb - lastRemoteInputs.hb)
+            else
+                lastRemoteInputs.t = remoteTargetInputs.t
+                lastRemoteInputs.s = remoteTargetInputs.s
+                lastRemoteInputs.b = remoteTargetInputs.b
+                lastRemoteInputs.c = remoteTargetInputs.c
+                lastRemoteInputs.hb = remoteTargetInputs.hb
+            end
+            
+            -- Periodic self-healing guard to ensure the vehicle VM extension is loaded and initialized
+            M._healTimer = (M._healTimer or 0) + dtReal
+            if M._healTimer >= 1.5 then
+                M._healTimer = 0
+                local remoteVeh = be:getObjectByID(remoteVehicleId)
+                if remoteVeh then
+                    remoteVeh:queueLuaCommand("local lmpv = extensions.lanMultiplayerVehicle or lanMultiplayerVehicle; if not lmpv or not lmpv.isRemote or not globalSyncVeh then extensions.load('lanMultiplayerVehicle'); lmpv = extensions.lanMultiplayerVehicle or lanMultiplayerVehicle; if lmpv then lmpv.setRemote(true) end end")
+                end
+            end
+            
+            M._ipcTimer = (M._ipcTimer or 0) + dtReal
+            if _G.tests or M._ipcTimer >= 0.04 then
+                M._ipcTimer = (M._ipcTimer or 0) - 0.04
+                if M._ipcTimer < 0 then M._ipcTimer = 0 end
+                
+                local inputsChanged = math.abs(lastRemoteInputs.t - M._lastSyncedInputs.t) > 0.001 or
+                                      math.abs(lastRemoteInputs.s - M._lastSyncedInputs.s) > 0.001 or
+                                      math.abs(lastRemoteInputs.b - M._lastSyncedInputs.b) > 0.001 or
+                                      math.abs(lastRemoteInputs.c - M._lastSyncedInputs.c) > 0.001 or
+                                      math.abs(lastRemoteInputs.hb - M._lastSyncedInputs.hb) > 0.001
+                
+                local stateChanged = math.abs(remoteTargetRPM - M._lastSyncedRPM) > 10 or
+                                     math.abs(remoteTargetWS - M._lastSyncedWS) > 0.1 or
+                                     remoteTargetGear ~= M._lastSyncedGear or
+                                     remoteTargetLights ~= M._lastSyncedLights or
+                                     remoteTargetFlags ~= M._lastSyncedFlags
+                
+                M._updateCounter = (M._updateCounter or 0) + 1
+                if inputsChanged or stateChanged or M._updateCounter >= 6 then
+                    M._updateCounter = 0
+                    M._lastSyncedInputs.t = lastRemoteInputs.t
+                    M._lastSyncedInputs.s = lastRemoteInputs.s
+                    M._lastSyncedInputs.b = lastRemoteInputs.b
+                    M._lastSyncedInputs.c = lastRemoteInputs.c
+                    M._lastSyncedInputs.hb = lastRemoteInputs.hb
+                    M._lastSyncedRPM = remoteTargetRPM
+                    M._lastSyncedWS = remoteTargetWS
+                    M._lastSyncedGear = remoteTargetGear
+                    M._lastSyncedLights = remoteTargetLights
+                    M._lastSyncedFlags = remoteTargetFlags
+                    
+                    local soundSyncVal = M.soundSyncEnabled and 1 or 0
+                    local wheelSyncVal = M.wheelSyncEnabled and 1 or 0
+                    local lightsSyncVal = M.lightsSyncEnabled and 1 or 0
+                    
+                    local remoteVeh = be:getObjectByID(remoteVehicleId)
+                    if remoteVeh then
+                        local cmd = string.format("if globalSyncVeh then globalSyncVeh(%f,%f,%f,%f,%f,%f,%d,%f,%d,%d,%d,%d,%d) end", 
+                            lastRemoteInputs.t, lastRemoteInputs.s, lastRemoteInputs.b, lastRemoteInputs.c, lastRemoteInputs.hb, 
+                            remoteTargetRPM, remoteTargetGear, remoteTargetWS, remoteTargetLights, remoteTargetFlags, 
+                            soundSyncVal, wheelSyncVal, lightsSyncVal)
+                        remoteVeh:queueLuaCommand(cmd)
+                    end
+                end
+            end
+        end
+        
+        M.applySmoothedRemoteState(dtReal)
+        
+        pingTimer = pingTimer + dtReal
+        if pingTimer >= pingInterval then
+            pingTimer = pingTimer - pingInterval
+            M.sendPing()
+        end
+        
+        metricsTimer = metricsTimer + dtReal
+        if metricsTimer >= metricsInterval then
+            metricsTimer = metricsTimer - metricsInterval
+            M.updateMetricsWindow()
+        end
+        
+        adaptiveTimer = adaptiveTimer + dtReal
+        if adaptiveTimer >= adaptiveInterval then
+            adaptiveTimer = adaptiveTimer - adaptiveInterval
+            M.adaptSendRate()
+        end
+
+        reliableCheckTimer = reliableCheckTimer + dtReal
+        if reliableCheckTimer >= 0.2 then
+            reliableCheckTimer = reliableCheckTimer - 0.2
+            local now = os.clock()
+            for msgId, pkt in pairs(M._pendingReliablePackets) do
+                if now - pkt.lastSent >= 0.2 then
+                    if pkt.retries >= 10 then
+                        log('E', 'lanMultiplayer', 'Reliable packet retry limit reached. Disconnecting...')
+                        M._droppedReliablePackets = M._droppedReliablePackets + 1
+                        disconnect()
+                        break
+                    else
+                        pkt.retries = pkt.retries + 1
+                        pkt.lastSent = now
+                        M._resendAttempts = M._resendAttempts + 1
+                        sendPacket(pkt.data)
+                    end
+                end
+            end
+        end
+        
+        if remoteVehicleId and debugDrawer then
+            local remoteVeh = be:getObjectByID(remoteVehicleId)
+            if remoteVeh and remoteVeh.getPosition then
+                local pos = remoteVeh:getPosition()
+                pos.z = pos.z + 2.0
+                debugDrawer:drawTextAdvanced(pos, remoteNickname or "Friend", nickColor, true, true, ColorI(0, 0, 0, 128))
+                pos.z = pos.z - 0.5
+                local speedText = string.format("%.0f km/h", remoteLastSpeed)
+                debugDrawer:drawTextAdvanced(pos, speedText, speedColor, true, true, ColorI(0, 0, 0, 128))
+                
+                if M._chatTimer and M._chatTimer > 0 then
+                    M._chatTimer = M._chatTimer - dtReal
+                    local chatPos = vec3(pos)
+                    chatPos.z = chatPos.z + 1.0
+                    debugDrawer:drawTextAdvanced(chatPos, string.format("[%s]: %s", remoteNickname, M._chatText), ColorF(1.0, 0.84, 0.0, 1.0), true, true, ColorI(0, 0, 0, 180))
+                end
+            end
+        end
+        
+        M._uiTelemetryTimer = (M._uiTelemetryTimer or 0) + dtReal
+        if M._uiTelemetryTimer >= 0.1 then
+            M._uiTelemetryTimer = 0
+            local myVeh = be:getPlayerVehicle(0)
+            if myVeh then
+                guihooks.trigger("lanMultiplayerRemoteTelemetry", {
+                    rpm = remoteTargetRPM,
+                    speed = remoteLastSpeed,
+                    gear = remoteTargetGear,
+                    throttle = lastRemoteInputs.t,
+                    steering = lastRemoteInputs.s,
+                    brake = lastRemoteInputs.b
+                })
+                
+                if remoteVehicleId and hasRemoteState then
+                    local pos = myVeh:getPosition()
+                    local dist = pos:distance(remoteTargetPos)
+                    local mySpeed = myVeh:getVelocity():length() * 3.6
+                    
+                    local myVel = myVeh:getVelocity()
+                    local myDir = myVeh:getDirectionVector()
+                    local myDriftAngle = 0
+                    if myVel:length() > 2.0 then
+                        local velDir = myVel:normalized()
+                        local cosAngle = myDir:dot(velDir)
+                        cosAngle = math.max(-1.0, math.min(1.0, cosAngle))
+                        myDriftAngle = math.acos(cosAngle) * 57.29577951
+                    end
+                    
+                    local remoteDir = remoteTargetRot * vec3(0, 1, 0)
+                    local remoteDriftAngle = 0
+                    if remoteTargetVel:length() > 2.0 then
+                        local velDir = remoteTargetVel:normalized()
+                        local cosAngle = remoteDir:dot(velDir)
+                        cosAngle = math.max(-1.0, math.min(1.0, cosAngle))
+                        remoteDriftAngle = math.acos(cosAngle) * 57.29577951
+                    end
+                    
+                    local angleDiff = math.abs(myDriftAngle - remoteDriftAngle)
+                    local speedDiff = math.abs(mySpeed - remoteLastSpeed)
+                    
+                    if dist < 15.0 and myDriftAngle > 10.0 and remoteDriftAngle > 10.0 and mySpeed > 10.0 then
+                        local proximityMult = math.max(1.0, 15.0 - dist)
+                        local angleMult = math.max(0.5, (90.0 - angleDiff) / 90.0)
+                        local pointsEarned = 10 * proximityMult * angleMult * 0.1
+                        M._tandemScore = (M._tandemScore or 0) + pointsEarned
+                    end
+                    
+                    guihooks.trigger("lanMultiplayerTandemUpdate", {
+                        dist = dist,
+                        speedDiff = speedDiff,
+                        angleDiff = angleDiff,
+                        score = M._tandemScore or 0
+                    })
+                end
+            end
+        end
+        
+        if M.damageSyncEnabled then
+            damageCheckTimer = damageCheckTimer + dtReal
+            if damageCheckTimer >= 1.0 then
+                damageCheckTimer = damageCheckTimer - 1.0
+                local myVeh = be:getPlayerVehicle(0)
+                if myVeh then
+                    local checkCmd = [[
+                    (function()
+                        local dmg = beamstate and beamstate.damage or 0
+                        if not lastReportedDmg then
+                            lastReportedDmg = dmg
+                            return
+                        end
+                        if dmg > lastReportedDmg then
+                            lastReportedDmg = dmg
+                            local deformed = {}
+                            if v and v.data and v.data.nodes then
+                                for cid, node in pairs(v.data.nodes) do
+                                    local pos = node.pos or (obj.getOriginalNodePosition and obj:getOriginalNodePosition(cid))
+                                    if pos then
+                                        local px = pos.x or pos[1]
+                                        local py = pos.y or pos[2]
+                                        local pz = pos.z or pos[3]
+                                        if px and py and pz then
+                                            local currentPos = obj:getNodePosition(cid)
+                                            local dx = px - currentPos.x
+                                            local dy = py - currentPos.y
+                                            local dz = pz - currentPos.z
+                                            if (dx*dx + dy*dy + dz*dz) > 0.0009 then -- 0.03m threshold squared
+                                                deformed[tostring(cid)] = {currentPos.x, currentPos.y, currentPos.z}
+                                            end
+                                        end
+                                    end
+                                end
+                                if next(deformed) then
+                                    local parts = {}
+                                    table.insert(parts, "{")
+                                    for cidStr, p in pairs(deformed) do
+                                        table.insert(parts, string.format("[%q]={%f,%f,%f},", cidStr, p[1], p[2], p[3]))
+                                    end
+                                    table.insert(parts, "}")
+                                    obj:queueGameEngineLua(string.format("extensions.lanMultiplayer.reportDamage(%s)", table.concat(parts)))
+                                end
+                            end
+                        end
+                    end)()
+                    ]]
+                    myVeh:queueLuaCommand(checkCmd)
+                end
+            end
+        end
+    end
+end
 
 --- Main Game Loop update hook
 local function onUpdate(dtReal, dtSim)
     if state == "IDLE" then
-        local ok, err = pcall(function()
-            -- FIX: Avoid re-creating the socket every frame on bind failure.
-            -- Only try to create if we don't have one yet.
-            if not discoveryRecvSocket then
-                local sock = socket.udp()
-                sock:settimeout(0)
-                local success, bindErr = sock:setsockname("0.0.0.0", 27019)
-                if success then
-                    discoveryRecvSocket = sock
-                else
-                    -- FIX: Close the socket if binding failed to prevent fd leak
-                    sock:close()
-                    -- Back off: don't retry every frame, only every 5 seconds
-                    M._discoveryRetryTimer = (M._discoveryRetryTimer or 0) + dtReal
-                    if M._discoveryRetryTimer < 5.0 then return end
-                    M._discoveryRetryTimer = 0
-                end
-            end
-            
-            if discoveryRecvSocket then
-                local data, ip, port = discoveryRecvSocket:receivefrom()
-                local receivedAny = false
-                while data do
-                    local msg = jsonDecode(data)
-                    if msg and msg.type == "lobby" then
-                        local key = string.format("%s:%d", ip, msg.port or 27015)
-                        discoveredLobbies[key] = {
-                            nickname = msg.nickname or "Host",
-                            ip = ip,
-                            port = msg.port or 27015,
-                            lastHeard = os.clock()
-                        }
-                        receivedAny = true
-                    end
-                    data, ip, port = discoveryRecvSocket:receivefrom()
-                end
-                
-                lobbyCleanTimer = lobbyCleanTimer + dtReal
-                if lobbyCleanTimer >= 1.0 or receivedAny then
-                    lobbyCleanTimer = 0
-                    local now = os.clock()
-                    local changed = false
-                    for key, lobby in pairs(discoveredLobbies) do
-                        if now - lobby.lastHeard > 10.0 then
-                            discoveredLobbies[key] = nil
-                            changed = true
-                        end
-                    end
-                    
-                    if changed or receivedAny then
-                        local list = {}
-                        for _, lobby in pairs(discoveredLobbies) do
-                            table.insert(list, {
-                                nickname = lobby.nickname,
-                                ip = lobby.ip,
-                                port = lobby.port
-                            })
-                        end
-                        if guihooks then
-                            guihooks.trigger("lanMultiplayerLobby", list)
-                        end
-                    end
-                end
-            end
-        end)
+        local ok, err = pcall(doIdleUpdate, dtReal)
         if not ok then
             log('E', 'lanMultiplayer', 'onUpdate IDLE discovery error: ' .. tostring(err))
         end
@@ -1929,364 +2402,7 @@ local function onUpdate(dtReal, dtSim)
         discoveryRecvSocket = nil
     end
     
-    local ok, err = pcall(function()
-        receivePackets()
-        handleConnectingHandshake(dtReal)
-        checkTimeout()
-        
-        if (state == "HOSTING" or state == "CONNECTED") and role == "HOST" then
-            beaconTimer = beaconTimer + dtReal
-            if beaconTimer >= 3.0 then
-                beaconTimer = 0
-                if not discoverySendSocket then
-                    local sock = socket.udp()
-                    sock:settimeout(0)
-                    sock:setoption("broadcast", true)
-                    discoverySendSocket = sock
-                end
-                if discoverySendSocket then
-                    local payload = jsonEncode({
-                        type = "lobby",
-                        nickname = myNickname,
-                        port = listenPort
-                    })
-                    discoverySendSocket:sendto(payload, "255.255.255.255", 27019)
-                end
-            end
-        else
-            beaconTimer = 0
-            if discoverySendSocket then
-                discoverySendSocket:close()
-                discoverySendSocket = nil
-            end
-        end
-        
-        if extensions.worldSync and extensions.worldSync.onUpdate then
-            extensions.worldSync.onUpdate(dtReal)
-        end
-        if extensions.gameplaySync and extensions.gameplaySync.onUpdate then
-            extensions.gameplaySync.onUpdate(dtReal)
-        end
-        if extensions.aiTrafficSync and extensions.aiTrafficSync.onUpdate then
-            extensions.aiTrafficSync.onUpdate(dtReal)
-        end
-
-        if state == "CONNECTED" then
-            sendTimer = sendTimer + dtReal
-            if sendTimer >= sendRate then
-                sendTimer = sendTimer - sendRate
-                if sendTimer > sendRate then
-                    sendTimer = 0
-                end
-                
-                local myVeh = be:getPlayerVehicle(0)
-                if myVeh then
-                    local myId = myVeh:getId()
-                    
-                    vehicleCheckTimer = vehicleCheckTimer + dtReal
-                    if vehicleCheckTimer >= 1.0 or myId ~= myVehicleId then
-                        vehicleCheckTimer = 0
-                        local model, config = getVehicleInfo(myVeh)
-                        if myId ~= myVehicleId or model ~= lastMyVehicleModel or not areConfigsEqual(config, lastMyVehicleConfig) then
-                            myVehicleId = myId
-                            lastMyVehicleModel = model
-                            lastMyVehicleConfig = config
-                            log('I', 'lanMultiplayer', 'Vehicle change detected. Sending spawn packet.')
-                            sendSpawn(model, config)
-                            
-                            if core_vehicleBridge then
-                                core_vehicleBridge.registerValueChangeNotification(myVeh, 'rpm')
-                                core_vehicleBridge.registerValueChangeNotification(myVeh, 'wheelspeed')
-                                core_vehicleBridge.registerValueChangeNotification(myVeh, 'gearIndex')
-                                core_vehicleBridge.registerValueChangeNotification(myVeh, 'lights_state')
-                                core_vehicleBridge.registerValueChangeNotification(myVeh, 'signal_L')
-                                core_vehicleBridge.registerValueChangeNotification(myVeh, 'signal_R')
-                                core_vehicleBridge.registerValueChangeNotification(myVeh, 'hazard')
-                                core_vehicleBridge.registerValueChangeNotification(myVeh, 'fog')
-                                core_vehicleBridge.registerValueChangeNotification(myVeh, 'lightbar')
-                                core_vehicleBridge.registerValueChangeNotification(myVeh, 'horn')
-                            end
-                        end
-                    end
-                    
-                    if M.backfireSyncEnabled then
-                        local localBackfire = core_vehicleBridge.getCachedVehicleData(myId, 'backfire') or 0
-                        if localBackfire > 0 and not M._localBackfireTriggered then
-                            M._localBackfireTriggered = true
-                            sendPacket({ type = "backfire" })
-                        elseif localBackfire == 0 then
-                            M._localBackfireTriggered = false
-                        end
-                    end
-                    
-                    local currentPos = myVeh:getPosition()
-                    if prevLocalPosInitialized then
-                        local dist = currentPos:distance(prevLocalPos)
-                        local speed = myVeh:getVelocity():length()
-                        if M.recoverySyncEnabled and dist > 10.0 and speed < 5.0 then
-                            local rot = getVehicleRotationQuat(myVeh)
-                            sendPacketReliable({
-                                type = "recovery",
-                                pos = { x = currentPos.x, y = currentPos.y, z = currentPos.z },
-                                rot = { x = rot.x, y = rot.y, z = rot.z, w = rot.w }
-                            })
-                            log('I', 'lanMultiplayer', 'Local vehicle recovery snap detected. Sending sync packet.')
-                        end
-                    end
-                    prevLocalPos.x = currentPos.x
-                    prevLocalPos.y = currentPos.y
-                    prevLocalPos.z = currentPos.z
-                    prevLocalPosInitialized = true
-                    
-                    sendUpdate()
-                end
-            end
-            
-            if remoteVehicleId and hasRemoteState then
-                if M.inputExtrapEnabled then
-                    local alpha = 1.0 - math.exp(-15 * dtReal)
-                    lastRemoteInputs.t = lastRemoteInputs.t + alpha * (remoteTargetInputs.t - lastRemoteInputs.t)
-                    lastRemoteInputs.s = lastRemoteInputs.s + alpha * (remoteTargetInputs.s - lastRemoteInputs.s)
-                    lastRemoteInputs.b = lastRemoteInputs.b + alpha * (remoteTargetInputs.b - lastRemoteInputs.b)
-                    lastRemoteInputs.c = lastRemoteInputs.c + alpha * (remoteTargetInputs.c - lastRemoteInputs.c)
-                    lastRemoteInputs.hb = lastRemoteInputs.hb + alpha * (remoteTargetInputs.hb - lastRemoteInputs.hb)
-                else
-                    lastRemoteInputs.t = remoteTargetInputs.t
-                    lastRemoteInputs.s = remoteTargetInputs.s
-                    lastRemoteInputs.b = remoteTargetInputs.b
-                    lastRemoteInputs.c = remoteTargetInputs.c
-                    lastRemoteInputs.hb = remoteTargetInputs.hb
-                end
-                
-                -- Periodic self-healing guard to ensure the vehicle VM extension is loaded and initialized
-                M._healTimer = (M._healTimer or 0) + dtReal
-                if M._healTimer >= 1.5 then
-                    M._healTimer = 0
-                    local remoteVeh = be:getObjectByID(remoteVehicleId)
-                    if remoteVeh then
-                        remoteVeh:queueLuaCommand("local lmpv = extensions.lanMultiplayerVehicle or lanMultiplayerVehicle; if not lmpv or not lmpv.isRemote or not globalSyncVeh then extensions.load('lanMultiplayerVehicle'); lmpv = extensions.lanMultiplayerVehicle or lanMultiplayerVehicle; if lmpv then lmpv.setRemote(true) end end")
-                    end
-                end
-                
-                M._ipcTimer = (M._ipcTimer or 0) + dtReal
-                if _G.tests or M._ipcTimer >= 0.04 then
-                    M._ipcTimer = (M._ipcTimer or 0) - 0.04
-                    if M._ipcTimer < 0 then M._ipcTimer = 0 end
-                    
-                    local inputsChanged = math.abs(lastRemoteInputs.t - M._lastSyncedInputs.t) > 0.001 or
-                                          math.abs(lastRemoteInputs.s - M._lastSyncedInputs.s) > 0.001 or
-                                          math.abs(lastRemoteInputs.b - M._lastSyncedInputs.b) > 0.001 or
-                                          math.abs(lastRemoteInputs.c - M._lastSyncedInputs.c) > 0.001 or
-                                          math.abs(lastRemoteInputs.hb - M._lastSyncedInputs.hb) > 0.001
-                    
-                    local stateChanged = math.abs(remoteTargetRPM - M._lastSyncedRPM) > 10 or
-                                         math.abs(remoteTargetWS - M._lastSyncedWS) > 0.1 or
-                                         remoteTargetGear ~= M._lastSyncedGear or
-                                         remoteTargetLights ~= M._lastSyncedLights or
-                                         remoteTargetFlags ~= M._lastSyncedFlags
-                    
-                    M._updateCounter = (M._updateCounter or 0) + 1
-                    if inputsChanged or stateChanged or M._updateCounter >= 6 then
-                        M._updateCounter = 0
-                        M._lastSyncedInputs.t = lastRemoteInputs.t
-                        M._lastSyncedInputs.s = lastRemoteInputs.s
-                        M._lastSyncedInputs.b = lastRemoteInputs.b
-                        M._lastSyncedInputs.c = lastRemoteInputs.c
-                        M._lastSyncedInputs.hb = lastRemoteInputs.hb
-                        M._lastSyncedRPM = remoteTargetRPM
-                        M._lastSyncedWS = remoteTargetWS
-                        M._lastSyncedGear = remoteTargetGear
-                        M._lastSyncedLights = remoteTargetLights
-                        M._lastSyncedFlags = remoteTargetFlags
-                        
-                        local soundSyncVal = M.soundSyncEnabled and 1 or 0
-                        local wheelSyncVal = M.wheelSyncEnabled and 1 or 0
-                        local lightsSyncVal = M.lightsSyncEnabled and 1 or 0
-                        
-                        local remoteVeh = be:getObjectByID(remoteVehicleId)
-                        if remoteVeh then
-                            local cmd = string.format("if globalSyncVeh then globalSyncVeh(%f,%f,%f,%f,%f,%f,%d,%f,%d,%d,%d,%d,%d) end", 
-                                lastRemoteInputs.t, lastRemoteInputs.s, lastRemoteInputs.b, lastRemoteInputs.c, lastRemoteInputs.hb, 
-                                remoteTargetRPM, remoteTargetGear, remoteTargetWS, remoteTargetLights, remoteTargetFlags, 
-                                soundSyncVal, wheelSyncVal, lightsSyncVal)
-                            remoteVeh:queueLuaCommand(cmd)
-                        end
-                    end
-                end
-            end
-            
-            applySmoothedRemoteState(dtReal)
-            
-            pingTimer = pingTimer + dtReal
-            if pingTimer >= pingInterval then
-                pingTimer = pingTimer - pingInterval
-                sendPing()
-            end
-            
-            metricsTimer = metricsTimer + dtReal
-            if metricsTimer >= metricsInterval then
-                metricsTimer = metricsTimer - metricsInterval
-                updateMetricsWindow()
-            end
-            
-            adaptiveTimer = adaptiveTimer + dtReal
-            if adaptiveTimer >= adaptiveInterval then
-                adaptiveTimer = adaptiveTimer - adaptiveInterval
-                adaptSendRate()
-            end
-
-            reliableCheckTimer = reliableCheckTimer + dtReal
-            if reliableCheckTimer >= 0.2 then
-                reliableCheckTimer = reliableCheckTimer - 0.2
-                local now = os.clock()
-                for msgId, pkt in pairs(M._pendingReliablePackets) do
-                    if now - pkt.lastSent >= 0.2 then
-                        if pkt.retries >= 10 then
-                            log('E', 'lanMultiplayer', 'Reliable packet retry limit reached. Disconnecting...')
-                            M._droppedReliablePackets = M._droppedReliablePackets + 1
-                            disconnect()
-                            break
-                        else
-                            pkt.retries = pkt.retries + 1
-                            pkt.lastSent = now
-                            M._resendAttempts = M._resendAttempts + 1
-                            sendPacket(pkt.data)
-                        end
-                    end
-                end
-            end
-            
-            if remoteVehicleId and debugDrawer then
-                local remoteVeh = be:getObjectByID(remoteVehicleId)
-                if remoteVeh and remoteVeh.getPosition then
-                    local pos = remoteVeh:getPosition()
-                    pos.z = pos.z + 2.0
-                    debugDrawer:drawTextAdvanced(pos, remoteNickname or "Friend", nickColor, true, true, ColorI(0, 0, 0, 128))
-                    pos.z = pos.z - 0.5
-                    local speedText = string.format("%.0f km/h", remoteLastSpeed)
-                    debugDrawer:drawTextAdvanced(pos, speedText, speedColor, true, true, ColorI(0, 0, 0, 128))
-                    
-                    if M._chatTimer and M._chatTimer > 0 then
-                        M._chatTimer = M._chatTimer - dtReal
-                        local chatPos = vec3(pos)
-                        chatPos.z = chatPos.z + 1.0
-                        debugDrawer:drawTextAdvanced(chatPos, string.format("[%s]: %s", remoteNickname, M._chatText), ColorF(1.0, 0.84, 0.0, 1.0), true, true, ColorI(0, 0, 0, 180))
-                    end
-                end
-            end
-            
-            M._uiTelemetryTimer = (M._uiTelemetryTimer or 0) + dtReal
-            if M._uiTelemetryTimer >= 0.1 then
-                M._uiTelemetryTimer = 0
-                local myVeh = be:getPlayerVehicle(0)
-                if myVeh then
-                    guihooks.trigger("lanMultiplayerRemoteTelemetry", {
-                        rpm = remoteTargetRPM,
-                        speed = remoteLastSpeed,
-                        gear = remoteTargetGear,
-                        throttle = lastRemoteInputs.t,
-                        steering = lastRemoteInputs.s,
-                        brake = lastRemoteInputs.b
-                    })
-                    
-                    if remoteVehicleId and hasRemoteState then
-                        local pos = myVeh:getPosition()
-                        local dist = pos:distance(remoteTargetPos)
-                        local mySpeed = myVeh:getVelocity():length() * 3.6
-                        
-                        local myVel = myVeh:getVelocity()
-                        local myDir = myVeh:getDirectionVector()
-                        local myDriftAngle = 0
-                        if myVel:length() > 2.0 then
-                            local velDir = myVel:normalized()
-                            local cosAngle = myDir:dot(velDir)
-                            cosAngle = math.max(-1.0, math.min(1.0, cosAngle))
-                            myDriftAngle = math.acos(cosAngle) * 57.29577951
-                        end
-                        
-                        local remoteDir = remoteTargetRot * vec3(0, 1, 0)
-                        local remoteDriftAngle = 0
-                        if remoteTargetVel:length() > 2.0 then
-                            local velDir = remoteTargetVel:normalized()
-                            local cosAngle = remoteDir:dot(velDir)
-                            cosAngle = math.max(-1.0, math.min(1.0, cosAngle))
-                            remoteDriftAngle = math.acos(cosAngle) * 57.29577951
-                        end
-                        
-                        local angleDiff = math.abs(myDriftAngle - remoteDriftAngle)
-                        local speedDiff = math.abs(mySpeed - remoteLastSpeed)
-                        
-                        if dist < 15.0 and myDriftAngle > 10.0 and remoteDriftAngle > 10.0 and mySpeed > 10.0 then
-                            local proximityMult = math.max(1.0, 15.0 - dist)
-                            local angleMult = math.max(0.5, (90.0 - angleDiff) / 90.0)
-                            local pointsEarned = 10 * proximityMult * angleMult * 0.1
-                            M._tandemScore = (M._tandemScore or 0) + pointsEarned
-                        end
-                        
-                        guihooks.trigger("lanMultiplayerTandemUpdate", {
-                            dist = dist,
-                            speedDiff = speedDiff,
-                            angleDiff = angleDiff,
-                            score = M._tandemScore or 0
-                        })
-                    end
-                end
-            end
-            
-            if M.damageSyncEnabled then
-                damageCheckTimer = damageCheckTimer + dtReal
-                if damageCheckTimer >= 1.0 then
-                    damageCheckTimer = damageCheckTimer - 1.0
-                    local myVeh = be:getPlayerVehicle(0)
-                    if myVeh then
-                        local checkCmd = [[
-                        (function()
-                            local dmg = beamstate and beamstate.damage or 0
-                            if not lastReportedDmg then
-                                lastReportedDmg = dmg
-                                return
-                            end
-                            if dmg > lastReportedDmg then
-                                lastReportedDmg = dmg
-                                local deformed = {}
-                                if v and v.data and v.data.nodes then
-                                    for cid, node in pairs(v.data.nodes) do
-                                        local pos = node.pos or (obj.getOriginalNodePosition and obj:getOriginalNodePosition(cid))
-                                        if pos then
-                                            local px = pos.x or pos[1]
-                                            local py = pos.y or pos[2]
-                                            local pz = pos.z or pos[3]
-                                            if px and py and pz then
-                                                local currentPos = obj:getNodePosition(cid)
-                                                local dx = px - currentPos.x
-                                                local dy = py - currentPos.y
-                                                local dz = pz - currentPos.z
-                                                if (dx*dx + dy*dy + dz*dz) > 0.0009 then -- 0.03m threshold squared
-                                                    deformed[tostring(cid)] = {currentPos.x, currentPos.y, currentPos.z}
-                                                end
-                                            end
-                                        end
-                                    end
-                                    if next(deformed) then
-                                        local parts = {}
-                                        table.insert(parts, "{")
-                                        for cidStr, p in pairs(deformed) do
-                                            table.insert(parts, string.format("[%q]={%f,%f,%f},", cidStr, p[1], p[2], p[3]))
-                                        end
-                                        table.insert(parts, "}")
-                                        obj:queueGameEngineLua(string.format("extensions.lanMultiplayer.reportDamage(%s)", table.concat(parts)))
-                                    end
-                                end
-                            end
-                        end)()
-                        ]]
-                        myVeh:queueLuaCommand(checkCmd)
-                    end
-                end
-            end
-        end
-    end)
-    
+    local ok, err = pcall(doConnectedUpdate, dtReal)
     if not ok then
         if not M._lastErrTime or os.clock() - M._lastErrTime > 1.0 then
             M._lastErrTime = os.clock()
@@ -2440,6 +2556,10 @@ local function loadStage3Submodules()
     if extensions and extensions.load then
         extensions.load('worldSync')
         extensions.load('gameplaySync')
+        extensions.load('contentSync')
+        extensions.load('sessionSync')
+        extensions.load('vehicleSync')
+        extensions.load('raceSync')
     end
 end
 
@@ -2657,6 +2777,70 @@ local function teleportToFriend()
     end
 end
 
+local function offerGaragePreset()
+    local myVeh = be:getPlayerVehicle(0)
+    if not myVeh then return end
+    if extensions.contentSync then
+        local code = extensions.contentSync.exportGaragePreset(myVeh:getId())
+        if code then
+            sendPacketReliable({
+                type = "garage_preset_offer",
+                preset_code = code,
+                from_nickname = myNickname
+            })
+            if guihooks then
+                guihooks.trigger("lanMultiplayerAlert", {
+                    type = "success",
+                    message = "Garage preset offered to friend!"
+                })
+            end
+        end
+    end
+end
+
+local function applyGaragePreset(code)
+    if extensions.contentSync then
+        local ok = extensions.contentSync.applyGaragePreset(code)
+        if ok then
+            if guihooks then
+                guihooks.trigger("lanMultiplayerAlert", {
+                    type = "success",
+                    message = "Garage preset applied successfully!"
+                })
+            end
+            local myVeh = be:getPlayerVehicle(0)
+            local model, config = getVehicleInfo(myVeh)
+            sendSpawn(model, config)
+            return true
+        end
+    end
+    return false
+end
+
+local function startRaceCountdown(seconds)
+    if extensions.raceSync then
+        extensions.raceSync.startCountdown(seconds)
+    end
+end
+
+local function setConvoyLeader(playerId, pos)
+    if extensions.raceSync then
+        extensions.raceSync.setConvoyLeader(playerId, pos)
+    end
+end
+
+local function submitEnvironmentVote(voteType, value)
+    if extensions.raceSync then
+        extensions.raceSync.submitEnvironmentVote(voteType, value)
+    end
+end
+
+local function setSessionPassword(password)
+    if extensions.sessionSync then
+        extensions.sessionSync.setPassword(password)
+    end
+end
+
 -- API Exports
 M.onUpdate = onUpdate
 M.onVehicleSpawned = onVehicleSpawned
@@ -2695,6 +2879,12 @@ M.setAiTrafficPlc = setAiTrafficPlc
 M.teleportToFriend = teleportToFriend
 M.reportDamage = reportDamage
 M.chatMessage = chatMessage
+M.offerGaragePreset = offerGaragePreset
+M.applyGaragePreset = applyGaragePreset
+M.startRaceCountdown = startRaceCountdown
+M.setConvoyLeader = setConvoyLeader
+M.submitEnvironmentVote = submitEnvironmentVote
+M.setSessionPassword = setSessionPassword
 
 -- Internal API exports for testing
 M.getInputsRaw = getInputsRaw
@@ -2703,12 +2893,8 @@ M.getSafeConfigPayload = getSafeConfigPayload
 M.areConfigsEqual = areConfigsEqual
 M.updateRemoteVehicleBinary = updateRemoteVehicleBinary
 M.updateRemoteVehicle = updateRemoteVehicle
-M.applySmoothedRemoteState = applySmoothedRemoteState
-M.sendUpdate = sendUpdate
-M.receivePackets = receivePackets
 M.resetMetrics = resetMetrics
 M.processPacket = processPacket
-M.adaptSendRate = adaptSendRate
 M.setTargetIp = function(ip) targetIp = ip end
 M.setTargetPort = function(port) targetPort = port end
 M.setRole = function(r) role = r end
